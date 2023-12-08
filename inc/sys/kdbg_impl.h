@@ -36,12 +36,21 @@ typedef struct log_buf {
 	lbl_t	busy;
 } logbuf_t;
 
+#define MAX_USR_CMD_ARGC 32
+typedef struct usrcmd {
+	char *	cmdline;
+	char *	argv[MAX_USR_CMD_ARGC];
+	int	cmdsz;
+	int	argc;
+} usrcmd_t;
+
 struct file;
 
 typedef struct drv_inst {
 	struct mutex		mtx;
 	struct file *		file;
 	logbuf_t		logbuf;
+	usrcmd_t		usrcmd;
 } drv_inst_t;
 
 drv_inst_t *drv_inst_alloc(struct file *);
@@ -55,5 +64,8 @@ void kdbg_vprint(drv_inst_t *, const char *, va_list)
     __attribute__((format(printf,2,0)));
 
 int kdbg_read_screen(drv_inst_t *, char __user *, size_t);
+
+int drv_inst_set_usrcmd(drv_inst_t *, const char __user *, size_t);
+int kdbg_main(drv_inst_t *);
 
 #endif // _SYS_KDBG_IMPL_H

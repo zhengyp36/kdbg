@@ -222,11 +222,127 @@ logbuf_uread(logbuf_t *lb, char __user *buf, int size)
 	return (size - remain);
 }
 
+static inline void
+usrcmd_init(usrcmd_t *uc)
+{
+	uc->cmdline = NULL;
+	uc->cmdsz = 0;
+	uc->argc = 0;
+}
+
+static inline void
+usrcmd_destroy(usrcmd_t *uc)
+{
+	if (uc->cmdline)
+		kfree(uc->cmdline);
+	usrcmd_init(uc);
+}
+
+static char *
+str_skip(char *str, char ch)
+{
+	while (*str && *str == ch)
+		str++;
+	return (*str ? str : NULL);
+}
+
+static char *
+str_reach(char *str, char ch)
+{
+	while (*str && *str != ch)
+		str++;
+	return (*str ? str : NULL);
+}
+
+static int
+usrcmd_split(drv_inst_t *inst, usrcmd_t *uc)
+{
+	char *str = str_skip(uc->cmdline, '\n');
+	if (!str)
+		return (0);
+	uc->argv[uc->argc++] = str;
+
+	for (;;) {
+		if (!(str = str_reach(str, '\n')))
+			break;
+		*str++ = '\0';
+
+		if (!(str = str_skip(str, '\n')))
+			break;
+		if (uc->argc >= MAX_USR_CMD_ARGC) {
+			kdbg_print(inst, "Number of args are more than %d,",
+			    MAX_USR_CMD_ARGC);
+			for (int i = 0; i < uc->argc; i++)
+				kdbg_print(inst, " %s", uc->argv[i]);
+			kdbg_print(inst, " ...\n");
+			return (-1);
+		}
+
+		uc->argv[uc->argc++] = str;
+	}
+
+	return (0);
+}
+
+static void
+usrcmd_move(usrcmd_t *dst, usrcmd_t *src)
+{
+	usrcmd_destroy(dst);
+
+	dst->cmdline = src->cmdline;
+	dst->cmdsz = src->cmdsz;
+
+	dst->argc = src->argc;
+	for (int i = 0; i < src->argc; i++)
+		dst->argv[i] = src->argv[i];
+
+	usrcmd_init(src);
+}
+
+int
+drv_inst_set_usrcmd(drv_inst_t *inst, const char __user *buf, size_t size)
+{
+	int rc = 0;
+
+	usrcmd_t uc;
+	usrcmd_init(&uc);
+
+	uc.cmdline = kmalloc(size + 1, GFP_KERNEL);
+	if (!uc.cmdline) {
+		rc = -ENOMEM;
+		goto done;
+	}
+
+	uc.cmdsz = size + 1;
+	uc.cmdline[size] = '\0';
+
+	rc = kdbg_copyfrom(uc.cmdline, buf, size);
+	if (rc) {
+		rc = -EFAULT;
+		goto done;
+	}
+
+	rc = usrcmd_split(inst, &uc);
+	if (rc) {
+		rc = -EINVAL;
+		goto done;
+	}
+
+	mutex_lock(&inst->mtx);
+	usrcmd_move(&inst->usrcmd, &uc);
+	mutex_unlock(&inst->mtx);
+
+done:
+	usrcmd_destroy(&uc);
+	return (rc);
+}
+
 static inline int
 drv_inst_init(drv_inst_t *inst, struct file *file)
 {
 	mutex_init(&inst->mtx);
 	inst->file = file;
+	usrcmd_init(&inst->usrcmd);
 	return (logbuf_init(&inst->logbuf));
 }
 
@@ -250,6 +366,7 @@ drv_inst_free(drv_inst_t *inst)
 {
 	if (inst) {
 		logbuf_destroy(&inst->logbuf);
+		usrcmd_destroy(&inst->usrcmd);
 		kfree(inst);
 	}
 }

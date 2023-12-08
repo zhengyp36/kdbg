@@ -70,6 +70,7 @@ kdbg_drv_read(struct file *file, char __user *buf, size_t len, loff_t *offset)
 	if (rc < 0)
 		kdbg_log("Failed to copy to user-buf, "
 		    "buf=0x%llx, len=%ld, rc=%d", (uint64_t)buf, len, rc);
+
 	return (rc);
 }
 
@@ -77,26 +78,10 @@ static ssize_t
 kdbg_drv_write(struct file *file,
     const char __user *buf, size_t len, loff_t *offset)
 {
-	char buffer[1024];
-
-	const char *pbuf = buf;
-	size_t remain = len;
-	while (remain > 0) {
-		size_t rdsz = MIN(remain, sizeof(buffer)-1);
-		int rc = kdbg_copyfrom(buffer, pbuf, rdsz);
-		if (rc) {
-			kdbg_log("Failed to copy from user-buf, rc=%d", rc);
-			return (-EFAULT);
-		}
-
-		pbuf += rdsz;
-		remain -= rdsz;
-
-		buffer[rdsz] = '\0';
-		kdbg_print(file->private_data, "ECHO: %s", buffer);
-	}
-
-	return (len);
+	int rc = drv_inst_set_usrcmd(file->private_data, buf, len);
+	if (!rc)
+		rc = kdbg_main(file->private_data);
+	return (rc ? rc : len);
 }
 
 static loff_t

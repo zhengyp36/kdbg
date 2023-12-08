@@ -25,6 +25,7 @@ else
 obj-m          += $(MODULE).o
 $(MODULE)-objs += frame/kdbg_drv.o
 $(MODULE)-objs += frame/kdbg_lib.o
+$(MODULE)-objs += frame/kdbg_main.o
 
 ccflags-y  += -std=gnu99 -Wall -Werror
 ccflags-y  += -Wno-declaration-after-statement
