@@ -65,6 +65,35 @@ void kdbg_vprint(drv_inst_t *, const char *, va_list)
 
 int kdbg_read_screen(drv_inst_t *, char __user *, size_t);
 
+#define KDBG_SEC(sec) __attribute__((section(sec)))
+
+typedef struct kdbg_cmd_impl {
+	const char *name;
+	const char *help;
+	int (*entry)(drv_inst_t *, int argc, char *argv[]);
+} cmd_impl_t;
+
+#define KDBG_CMD_DEF(_name,_help,_arg0,_arg1,_arg2)			\
+static int __kdbg_cmd_entry_##_name(drv_inst_t *, int, char *[]);	\
+									\
+static cmd_impl_t __kdbg_cmd_ctrl_##_name = {				\
+	.name  = #_name,						\
+	.help  = _help,							\
+	.entry = __kdbg_cmd_entry_##_name				\
+};									\
+									\
+KDBG_SEC("._kdbg.cmd") cmd_impl_t * __kdbg_cmd_ctrl_ptr_##_name =	\
+	&__kdbg_cmd_ctrl_##_name;					\
+									\
+static int __kdbg_cmd_entry_##_name(_arg0, _arg1, _arg2)
+
+#define KDBG_CMD_DEF_START()	\
+	KDBG_SEC("._kdbg.cmd") cmd_impl_t *__kdbg_start_cmd
+	extern cmd_impl_t *__kdbg_start_cmd;
+#define KDBG_CMD_DEF_STOP()	\
+	KDBG_SEC("._kdbg.cmd") cmd_impl_t *__kdbg_stop_cmd
+	extern cmd_impl_t *__kdbg_stop_cmd;
+
 int drv_inst_set_usrcmd(drv_inst_t *, const char __user *, size_t);
 int kdbg_main(drv_inst_t *);
 

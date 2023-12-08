@@ -32,7 +32,6 @@ function cmdAccess () {
     local bg=$!
     
     if [ $# -eq 0 ]; then
-        echo "Usage: $SCRIPT access <cmd> ..."
         echo help >&$fd; local rc=$?
     elif [ $# -eq 2 -a "x$1" = "x-f" -a -f "$2" ]; then
         cat $2 >&$fd; local rc=$?
@@ -87,7 +86,7 @@ function cmdDriver () {
 }
 
 function usage () {
-    echo "Usage: $SCRIPT driver <makeAll|clean|install|uninstall> ..."
+    echo "Usage: $SCRIPT driver <makeAll|makeClean|install|uninstall> ..."
     echo "       $SCRIPT access <cmd> ..."
 }
 
