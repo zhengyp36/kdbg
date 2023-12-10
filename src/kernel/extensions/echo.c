@@ -1,3 +1,4 @@
+#include <sys/ksym.h>
 #include <sys/kdbg.h>
 #include <sys/kdbg_impl.h>
 #include <linux/kernel.h>

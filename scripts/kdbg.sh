@@ -88,6 +88,9 @@ function cmdDriver () {
 function usage () {
     echo "Usage: $SCRIPT driver <makeAll|makeClean|install|uninstall> ..."
     echo "       $SCRIPT access <cmd> ..."
+    echo "Environ-Varibles:"
+    echo "       ksym_demo_enable=true"
+    echo "        spa_demo_enable=true"
 }
 
 function Main () {

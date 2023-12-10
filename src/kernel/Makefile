@@ -16,12 +16,21 @@ export TOP_DIR
 export MODULE
 export EXT_OBJS
 
-all:
+export ksym_demo_enable
+export spa_demo_enable
+
+ifeq ($(spa_demo_enable),true)
+DEPEND_INC_HEADERS += $(TOP_DIR)/extensions/zfs_depend.h
+endif
+
+all: $(DEPEND_INC_HEADERS)
 	$(MAKE) -C $(KBUILD_DIR) M=$(TOP_DIR) modules
-	@echo "EXT_OBJS=$(EXT_OBJS)"
 
 clean:
 	$(MAKE) -C $(KBUILD_DIR) M=$(TOP_DIR) clean
+
+$(TOP_DIR)/%.h: $(TOP_DIR)/%.in
+	@$(TOP_DIR)/../../scripts/ksym.py $<
 
 else
 
@@ -37,5 +46,13 @@ ccflags-y  += -std=gnu99 -Wall -Werror
 ccflags-y  += -Wno-declaration-after-statement
 ccflags-y  += -I$(TOP_DIR)/../../inc
 ccflags-y  += -D_KERNEL=1 -DKDBG_DEVNAME=\"$(MODULE)\"
+
+ifeq ($(ksym_demo_enable),true)
+ccflags-y  += -DKSYM_DEMO_ENABLE
+endif
+
+ifeq ($(spa_demo_enable),true)
+ccflags-y  += -DSPA_DEMO_ENABLE
+endif
 
 endif

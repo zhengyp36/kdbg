@@ -1,3 +1,4 @@
+#include <sys/ksym.h>
 #include <sys/kdbg.h>
 #include <sys/kdbg_impl.h>
 #include <linux/fs.h>
@@ -78,6 +79,14 @@ static ssize_t
 kdbg_drv_write(struct file *file,
     const char __user *buf, size_t len, loff_t *offset)
 {
+	drv_inst_t *inst = file->private_data;
+	if (!ksym_imported()) {
+		kdbg_print(inst, "There are some symbols not imported.\n");
+		kdbg_print(inst, "Run command 'scripts/ksym.py %s.ko' "
+		    "and try again\n", KDBG_DEVNAME);
+		return (-EPERM);
+	}
+
 	int rc = drv_inst_set_usrcmd(file->private_data, buf, len);
 	if (!rc)
 		rc = kdbg_main(file->private_data);
