@@ -2,7 +2,7 @@
 
 DEV_NAME=kdbg
 DEV_PATH=/dev/$DEV_NAME
-SRC_PATH=/home/osboxes/workspace/kdbg/src/kernel
+SRC_PATH=$(dirname $0)/../src/kernel
  KO_PATH=$SRC_PATH/${DEV_NAME}.ko
   SCRIPT=$(basename $0)
 

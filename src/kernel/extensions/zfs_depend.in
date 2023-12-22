@@ -3,3 +3,4 @@ spa_t
 abd_t
 -abd_iter_func_t
 dsl_crypto_key_t
+vdev_t

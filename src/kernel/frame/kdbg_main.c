@@ -40,5 +40,5 @@ kdbg_main(drv_inst_t *inst)
 		return (-1);
 	}
 
-	return (def->entry(inst, uc->argc, uc->argv));
+	return (def->entry(def, inst, uc->argc, uc->argv));
 }

@@ -216,6 +216,54 @@ drv_ctrl_fini(void)
 	});
 }
 
+typedef struct modref {
+	struct mutex mtx;
+	int ref;
+} modref_t;
+
+static modref_t kdbg_modref = {
+	.mtx = __MUTEX_INITIALIZER(kdbg_modref.mtx),
+	.ref = 0
+};
+
+int
+kdbg_mod_get(void)
+{
+	modref_t *ref = &kdbg_modref;
+	mutex_lock(&ref->mtx);
+	if (ref->ref == 0)
+		try_module_get(THIS_MODULE);
+	ref->ref++;
+	int val = ref->ref;
+	mutex_unlock(&ref->mtx);
+	return (val);
+}
+
+int
+kdbg_mod_put(void)
+{
+	modref_t *ref = &kdbg_modref;
+	mutex_lock(&ref->mtx);
+	if (ref->ref > 0) {
+		ref->ref--;
+		if (ref->ref == 0)
+			module_put(THIS_MODULE);
+	}
+	int val = ref->ref;
+	mutex_unlock(&ref->mtx);
+	return (val);
+}
+
+int
+kdbg_mod_ref(void)
+{
+	modref_t *ref = &kdbg_modref;
+	mutex_lock(&ref->mtx);
+	int val = ref->ref;
+	mutex_unlock(&ref->mtx);
+	return (val);
+}
+
 static int __init
 kdbg_drv_init(void)
 {

@@ -14,4 +14,8 @@ void _kdbg_print(drv_inst_t *, const char *, ...)
 int kdbg_copyto(void *, const void *, unsigned long);
 int kdbg_copyfrom(void *, const void *, unsigned long);
 
+int kdbg_mod_get(void);
+int kdbg_mod_put(void);
+int kdbg_mod_ref(void);
+
 #endif // _SYS_KDBG_H
