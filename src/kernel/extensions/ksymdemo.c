@@ -15,7 +15,7 @@ KFUN_IMPORT(zfs, int, spa_open, (const char *, struct spa **, const void *), 1);
 
 #endif // KSYM_DEMO_ENABLE
 
-KDBG_CMD_DEF(ksymdemo, "", drv_inst_t *inst, int argc, char *argv[])
+KDBG_CMD_DEF_LOW(ksymdemo, "", drv_inst_t *inst, int argc, char *argv[])
 {
 #ifdef KSYM_DEMO_ENABLE
 	kdbg_print(inst, "spa_open_0=0x%llx\n", (uint64_t)&spa_open_0);

@@ -67,6 +67,7 @@ void kdbg_vprint(struct drv_inst *, const char *, va_list)
 int kdbg_read_screen(struct drv_inst *, char __user *, size_t);
 
 int drv_inst_set_usrcmd(struct drv_inst *, const char __user *, size_t);
+void kdbg_cmd_table_init(void);
 int kdbg_main(struct drv_inst *);
 
 #endif // _SYS_KDBG_IMPL_H

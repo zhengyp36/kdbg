@@ -27,7 +27,7 @@ spa_demo(drv_inst_t *inst, int argc, char *argv[])
 }
 #endif // SPA_DEMO_ENABLE
 
-KDBG_CMD_DEF(spademo, "", drv_inst_t *inst, int argc, char *argv[])
+KDBG_CMD_DEF_LOW(spademo, "", drv_inst_t *inst, int argc, char *argv[])
 {
 #ifdef SPA_DEMO_ENABLE
 	spa_demo(inst, argc, argv);

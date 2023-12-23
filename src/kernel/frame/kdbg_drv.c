@@ -274,6 +274,8 @@ kdbg_drv_init(void)
 
 	default_drv_inst = drv_inst_alloc(NULL);
 	kdbg_log("kdbg(name:%s) init", KDBG_DEVNAME);
+
+	kdbg_cmd_table_init();
 	return (0);
 }
 
