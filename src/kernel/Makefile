@@ -18,6 +18,8 @@ export EXT_OBJS
 
 export ksym_demo_enable
 export spa_demo_enable
+export trace_demo_enable
+export update_zfs_depend
 
 ifeq ($(spa_demo_enable),true)
 DEPEND_INC_HEADERS += $(TOP_DIR)/extensions/zfs_depend.h
@@ -30,7 +32,11 @@ clean:
 	$(MAKE) -C $(KBUILD_DIR) M=$(TOP_DIR) clean
 
 $(TOP_DIR)/%.h: $(TOP_DIR)/%.in
-	@$(TOP_DIR)/../../scripts/ksym.py $<
+	@if [ -f $@ -a "$(update_zfs_depend)" = "false" ]; then \
+		echo "Skip generating $@"; \
+	else \
+		$(TOP_DIR)/../../scripts/ksym.py $<; \
+	fi
 
 else
 
@@ -51,6 +57,12 @@ ccflags-y  += -D_KERNEL=1 -DKDBG_DEVNAME=\"$(MODULE)\"
 
 ifeq ($(ksym_demo_enable),true)
 ccflags-y  += -DKSYM_DEMO_ENABLE
+endif
+
+ifeq ($(trace_demo_enable),true)
+ccflags-y  += -DKDBG_TRACE_DEF_DEMO
+ccflags-y  += -DKDBG_TRACE_IMPL_DEMO
+ccflags-y  += -DKDBG_TRACE_IMPORT_DEMO
 endif
 
 ifeq ($(spa_demo_enable),true)

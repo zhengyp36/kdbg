@@ -3,6 +3,7 @@
 
 #include <sys/kdbg_trace.h>
 
+/* This function is called during inserting kdbg.ko */
 void kdbg_trace_init(void);
 
 /* Register trace-points definitions
@@ -15,28 +16,14 @@ void kdbg_trace_init(void);
  */
 int kdbg_trace_register(const char *mod, kdbg_trace_def_t **defs);
 
-/* Unregister all trace-points definitions
- *   @retval : how many trace-points disabled at this time
- *
- * Note:
- *   It's necessary to unregister all trace-points definitions registered before
- * because some modules may be removed already and It is unsafe to access these
- * definitions. So call it in ksym.py before register new definitions.
- */
-int kdbg_trace_unregister_all(void);
-
-/*
- * Call the function to number every trace-definition. It's necessary for
- * ksym.py after calling the kdbg_trace_register
- */
-void kdbg_trace_update_order(void);
-
 typedef struct kdbg_trace_def_list {
-	kdbg_trace_def_t *head;
-	int cnt;
+	kdbg_trace_def_t *	head;
+	int			cnt;
+	int			enable_cnt;
 } kdbg_trace_def_list_t;
 
 typedef struct kdbg_trace_imp {
+	kdbg_trace_head_t		head;
 	const char * const		mod;
 	const char * const		name;
 	kdbg_trace_def_list_t		defs;
@@ -45,38 +32,41 @@ typedef struct kdbg_trace_imp {
 	const int			argc;
 	const int			line;
 	const char * const		file;
-	struct kdbg_trace_imp *		next;
 	struct kdbg_trace_imp *		next_mod;
 	struct kdbg_trace_imp *		curr_mod;
-	int				traceid;
+	int				hold_mod;
 } kdbg_trace_imp_t;
 
-#define kdbg_for_each_trace_impl(impl)					\
-	for (kdbg_trace_imp_t **_ = &__kdbg_trace_impl_start + 1;	\
-	    _ < &__kdbg_trace_impl_stop && ((impl) = *_); _++)
+/* This function will never be called. But if 'head' was not the first
+ * member of struct kdbg_trace_imp_t compiling would fail */
+static inline void
+__check_struct_head_kdbg_trace_imp_t__(void)
+{
+	kdbg_build_bug_on(kdbg_offsetof(kdbg_trace_imp_t,head.next));
+}
 
 /* Import module but not define no implement of trace-point */
-#define KDBG_TRACE_IMPORT(mod) __KDBG_TRACE_DEFINE(mod,_,0,0)
-#define KDBG_TRACE_INVALID_NAME "_"
+#define KDBG_TRACE_IMPORT(mod) __KDBG_TRACE_DEFINE(mod,_,"",0,0)
 
 /* Import module and define an implement of trace-point */
 #define KDBG_TRACE_DEFINE(mod,name,...)					\
 	static void _kdbg_trace_fun_name(mod,name)(			\
 	    const kdbg_trace_def_t *, ...);				\
-	__KDBG_TRACE_DEFINE(mod, name,					\
+	__KDBG_TRACE_DEFINE(mod,name,#name,				\
 	    _kdbg_trace_fun_name(mod,name),				\
 	    _kdbg_macro_argc(__VA_ARGS__));				\
 	static void _kdbg_trace_fun_name(mod,name)(			\
 	    const kdbg_trace_def_t *_kdbg_trace_def_ptr_, ...)
 
-#define __KDBG_TRACE_DEFINE(_mod,_name,_call,_argc)			\
+#define __KDBG_TRACE_DEFINE(_mod,_name,strname,_call,_argc)		\
 	static kdbg_trace_imp_t _kdbg_trace_imp_name(_mod,_name) = {	\
-		.mod	= #_mod,					\
-		.name	= #_name,					\
-		.call	= _call,					\
-		.argc	= _argc,					\
-		.file	= __FILE__,					\
-		.line	= __LINE__					\
+		.head		= { .type = KDBG_TRACE_IMP },		\
+		.mod		= #_mod,				\
+		.name		= strname,				\
+		.call		= _call,				\
+		.argc		= _argc,				\
+		.file		= __FILE__,				\
+		.line		= __LINE__				\
 	};								\
 	KDBG_TRACE_SEC("._kdbg.trace.impl") kdbg_trace_imp_t *		\
 		_kdbg_trace_ptr_name(_mod,_name) =			\

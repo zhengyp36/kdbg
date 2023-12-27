@@ -1,7 +1,8 @@
+#if defined(KDBG_TRACE_DEF_DEMO) || \
+    defined(KDBG_TRACE_IMPL_DEMO) || \
+    defined(KDBG_TRACE_IMPORT_DEMO)
 #define _KDBG_TRACE_ENABLE
-#define KDBG_TRACE_DEF_DEMO
-#define KDBG_TRACE_IMPL_DEMO
-#define KDBG_TRACE_IMPORT_DEMO
+#endif
 
 #include <sys/kdbg.h>
 #include <sys/kdbg_impl.h>
@@ -33,50 +34,44 @@ KDBG_TRACE_DEFINE(kdbg2, TP2, kdbg_trace_def_t **defs, void *pfn, int id) {}
 #endif // KDBG_TRACE_IMPL_DEMO
 
 #ifdef KDBG_TRACE_REGISTER_BY_KSYM
-/*
- * # cat /proc/kallsyms | grep '\[kdbg\]' | grep -e kdbg_trace_register -e kdbg_trace_unregister_all -e _kdbg_trace_def_
- * ffffffffc0fde320 d _kdbg_trace_def_v1___TP1_ff_aa_55_.11356	[kdbg]
- * ffffffffc0fde2e0 d _kdbg_trace_def_v1___TP1_ff_aa_55_.11360	[kdbg]
- * ffffffffc0fde2a0 d _kdbg_trace_def_v1___TP2_ff_aa_55_.11363	[kdbg]
- * ffffffffc0fde260 d _kdbg_trace_def_v1___TP2_ff_aa_55_.11366	[kdbg]
- * ffffffffc0fdb0d0 t kdbg_trace_register	[kdbg]
- * ffffffffc0fdb220 t kdbg_trace_unregister_all	[kdbg]
- */
-
-#include <linux/kernel.h>
-
 #ifndef ARRAY_SIZE
 #define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))
 #endif
 
-#define DEF_TRACE(addr) (kdbg_trace_def_t*)0x##addr
+#define DEF_FUNC(type,name,addr) type name = (type)0x##addr##UL
+#define DEF_TRACE(addr) (kdbg_trace_def_t*)0x##addr##UL
 
-#define DEF_FUNC(ret_type, func, proto, addr)	\
-	ret_type (*func) proto = (typeof(func))0x##addr
+#define REG_TRACE(lmod, rmod, traces, trace_cnt)			\
+	do {								\
+		int errcnt = reg_fn(rmod, traces);			\
+		printk("KDBG:KSYM: Register traces module"		\
+		    "(%s->%s), total(%ld), errcnt(%d)",			\
+		    lmod, rmod, trace_cnt, errcnt);			\
+	} while (0)
 
 typedef struct kdbg_trace_def kdbg_trace_def_t;
+typedef int (*reg_trace_fn_t)(const char *, kdbg_trace_def_t**);
 
-/* import:kdbg_trace_register */
-DEF_FUNC(int, trace_register,
-	(const char *, kdbg_trace_def_t **), ffffffffc0fdb0d0);
-
-/* import:kdbg_trace_unregister_all */
-DEF_FUNC(void, trace_unregister_all, (void), ffffffffc0fdb220);
-
-void
-do_register(void)
+static void
+do_trace(void)
 {
-	/* module:kdbg */
-	static kdbg_trace_def_t *kdbg_traces[] = {
-		DEF_TRACE(ffffffffc0fde320),
-		DEF_TRACE(ffffffffc0fde2e0),
-		DEF_TRACE(ffffffffc0fde2a0),
-		DEF_TRACE(ffffffffc0fde260),
-		0,
-	};
-	int kdbg_errcnt = trace_register("kdbg", kdbg_traces);
-	printk("Register kdbg_traces mod(kdbg), total(%ld), errcnt(%d)",
-	    ARRAY_SIZE(kdbg_traces), kdbg_errcnt);
-}
+	/* module: kdbg */ {
+		/* import function: kdbg_trace_register */
+		DEF_FUNC(reg_trace_fn_t, reg_fn, ffffffffc0ea1d00);
 
+		static kdbg_trace_def_t *kdbg_kdbg_traces[] = {
+			DEF_TRACE(ffffffffc0ea5320), /* kdbg->kdbg:TP1 */
+			DEF_TRACE(ffffffffc0ea52e0), /* kdbg->kdbg:TP1 */
+			DEF_TRACE(ffffffffc0ea52a0), /* kdbg->kdbg:TP2 */
+			DEF_TRACE(ffffffffc0ea5260), /* kdbg->kdbg:TP2 */
+			DEF_TRACE(0)
+		};
+		REG_TRACE("kdbg", "kdbg", kdbg_kdbg_traces,
+		    ARRAY_SIZE(kdbg_kdbg_traces)-1);
+	}
+
+	/* module:??? */ {
+		// ...
+	}
+}
 #endif // KDBG_TRACE_REGISTER_BY_KSYM

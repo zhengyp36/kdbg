@@ -283,15 +283,12 @@ class CodeForTrace(object):
             '#define DEF_TRACE(addr) (kdbg_trace_def_t*)0x##addr##UL'
         ]))
         codes.append(Code(type='macro', name='REG_TRACE', impl=[
-            '#define REG_TRACE(lmod, rmod, traces, trace_cnt) \\',
-            '\tdo { \\',
-            '\t\tint errcnt; \\',
-            '\t\tunreg_fn(); \\',
-            '\t\terrcnt = reg_fn(rmod,traces); \\',
-            '\t\tprintk("KDBG:KSYM: Register traces module(%s->%s), ' +
-                'total(%ld), errcnt(%d)", \\',
-            '\t\t    lmod, rmod, trace_cnt, errcnt); \\',
-            '\t\torder_fn(); \\',
+            '#define REG_TRACE(lmod, rmod, traces, trace_cnt)' + '\t'*3 + '\\',
+            '\tdo {' + '\t'*8 + '\\',
+            '\t\tint errcnt = reg_fn(rmod, traces);' + '\t'*3 + '\\',
+            '\t\tprintk("KDBG:KSYM: Register traces module"' + '\t'*2 + '\\',
+            '\t\t    "(%s->%s), total(%ld), errcnt(%d)",' + '\t'*3 + '\\',
+            '\t\t    lmod, rmod, trace_cnt, errcnt);' + '\t'*3 +'\\',
             '\t} while (0)'
         ]))
         codes.append(Code(type='typedef', name='kdbg_trace_def_t', impl=[
@@ -299,12 +296,6 @@ class CodeForTrace(object):
         ]))
         codes.append(Code(type='typedef', name='reg_trace_fn_t', impl=[
             'typedef int (*reg_trace_fn_t)(const char *, kdbg_trace_def_t**);'
-        ]))
-        codes.append(Code(type='typedef', name='unreg_trace_fn_t', impl=[
-            'typedef int (*unreg_trace_fn_t)(void);'
-        ]))
-        codes.append(Code(type='typedef', name='void_void_fn_t', impl=[
-            'typedef void (*void_void_fn_t)(void);'
         ]))
         
         codes.append(Code(type='func', name='do_trace', impl=[
@@ -346,21 +337,18 @@ class CodeForTrace(object):
                 print('No traces found in module(%s)' % localMod)
                 return
         
-        code.add('\t/* module:%s */' % localMod)
-        code.add('\t{')
-        code.add('\t\tDEF_FUNC(void_void_fn_t, order_fn, %s);' %
-            self.ksym.lookupSymbol(mod=localMod, sym='kdbg_trace_update_order'))
+        code.add('\t/* module:%s */ {' % localMod)
+        code.add('\t\t/* import function: kdbg_trace_register */')
         code.add('\t\tDEF_FUNC(reg_trace_fn_t, reg_fn, %s);' %
             self.ksym.lookupSymbol(mod=localMod, sym='kdbg_trace_register'))
-        code.add('\t\tDEF_FUNC(unreg_trace_fn_t, unreg_fn, %s);' %
-            self.ksym.lookupSymbol(mod=localMod,
-                sym='kdbg_trace_unregister_all'))
         code.add('')
         
         for remoteMod in self.traces[localMod]:
             varTracesName = '%s_%s_traces' % (localMod, remoteMod)
             code.add('\t\tstatic kdbg_trace_def_t *%s[] = {' % varTracesName)
-            for name in self.traces[localMod][remoteMod]:
+            nameList = [name for name in self.traces[localMod][remoteMod]]
+            nameList.sort()
+            for name in nameList:
                 traceDesc = '%s->%s:%s' % (localMod, remoteMod, name)
                 for addr in self.traces[localMod][remoteMod][name]:
                     code.add('\t\t\tDEF_TRACE(%s), /* %s */' % (addr,traceDesc))
@@ -368,10 +356,12 @@ class CodeForTrace(object):
                         print('Trace %s: trace-def-addr=%s' % (traceDesc, addr))
             code.add('\t\t\tDEF_TRACE(0)')
             code.add('\t\t};')
+            code.add('\t\tREG_TRACE("%s", "%s", %s,' % (
+                localMod, remoteMod, varTracesName))
+            code.add('\t\t    ARRAY_SIZE(%s) - 1);' % varTracesName)
             code.add('')
-            code.add('\t\tREG_TRACE("%s", "%s", %s, ARRAY_SIZE(%s)-1);'
-                % (localMod, remoteMod, varTracesName, varTracesName))
         
+        code.removeLast()
         code.add('\t}')
     
     def traceName(self, mod='(\w+)', name='(\w+)', flag='(\w+)'):

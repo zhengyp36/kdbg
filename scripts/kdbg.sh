@@ -92,6 +92,8 @@ function usage () {
     echo "Environ-Varibles:"
     echo "       ksym_demo_enable=true"
     echo "        spa_demo_enable=true"
+    echo "      trace_demo_enable=true"
+    echo "      update_zfs_depend=false"
 }
 
 function Main () {

@@ -12,33 +12,45 @@ struct kdbg_trace_imp;
 
 typedef void (kdbg_trace_call_t)(const struct kdbg_trace_def *, ...);
 
+typedef enum {
+	KDBG_TRACE_DEF,
+	KDBG_TRACE_IMP,
+} kdbg_trace_type_t;
+
+typedef struct kdbg_trace_head {
+	struct kdbg_trace_head *next;
+	const kdbg_trace_type_t type;
+	int id;
+} kdbg_trace_head_t;
+
 typedef struct kdbg_trace_def {
+	kdbg_trace_head_t	head;
 	const char * const	name;
 	struct kdbg_trace_imp *	impl;
 	kdbg_trace_call_t *	call;
 	const int		argc;
-	int			enable;
-	int			traceid;
 	const int		line;
 	const char * const	file;
 	const char * const	func;
-	struct kdbg_trace_def *	next;
 } kdbg_trace_def_t;
 
 #define _kdbg_trace_def(n,...)						\
 	do {								\
 		static kdbg_trace_def_t _kdbg_trace_name_(n,def,_) = {	\
+			.head    = { .type = KDBG_TRACE_DEF },		\
 			.name    = #n,					\
 			.argc    = _kdbg_macro_argc(__VA_ARGS__),	\
-			.traceid = -1,					\
 			.file    = __FILE__,				\
 			.func    = __func__,				\
-			.line    = __LINE__,				\
+			.line    = __LINE__				\
 		};							\
-		kdbg_trace_def_t *def = &_kdbg_trace_name_(n,def,_);	\
-		kdbg_trace_call_t *call = def->call;			\
-		if (def->enable && call)				\
-			call(def, ##__VA_ARGS__);			\
+		kdbg_trace_call_t *call =				\
+		    _kdbg_trace_name_(n,def,_).call;			\
+		kdbg_build_bug_on(					\
+		    kdbg_offsetof(kdbg_trace_def_t,head.next));		\
+		if (call)						\
+			call(&_kdbg_trace_name_(n,def,_),		\
+			    ##__VA_ARGS__);				\
 	} while (0)
 
 #define _kdbg_trace_name_(name,flag,mod)				\
@@ -63,5 +75,8 @@ typedef struct kdbg_trace_def {
 	_23, _22, _21, _20, _19, _18, _17, _16,				\
 	_15, _14, _13, _12, _11, _10, _09, _08,				\
 	_07, _06, _05, _04, _03, _02, _01, _00, ...) _00
+
+#define kdbg_offsetof(s,t) ((unsigned long)&((s*)0)->t)
+#define kdbg_build_bug_on(cond) (void)(sizeof(char[1-2*!!(cond)]))
 
 #endif // _SYS_KDBG_TRACE_H
