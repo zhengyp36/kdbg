@@ -1,6 +1,7 @@
 #include <sys/ksym.h>
 #include <sys/kdbg.h>
 #include <sys/kdbg_impl.h>
+#include <sys/kdbg_trace_impl.h>
 #include <linux/fs.h>
 #include <linux/cdev.h>
 #include <linux/init.h>
@@ -275,7 +276,9 @@ kdbg_drv_init(void)
 	default_drv_inst = drv_inst_alloc(NULL);
 	kdbg_log("kdbg(name:%s) init", KDBG_DEVNAME);
 
+	kdbg_trace_init();
 	kdbg_cmd_table_init();
+
 	return (0);
 }
 

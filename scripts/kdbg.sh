@@ -6,12 +6,13 @@ SRC_PATH=$(dirname $0)/../src/kernel
  KO_PATH=$SRC_PATH/${DEV_NAME}.ko
   SCRIPT=$(basename $0)
 
-function isMade       () { [ -e $KO_PATH ];         }
-function cmdMake      () { make -C $SRC_PATH $@;    }
+function doCmd        () { echo "$ $@"; $@;               }
+function isMade       () { [ -e $KO_PATH ];               }
+function cmdMake      () { doCmd make -C $SRC_PATH $@;    }
 
-function isInstalled  () { [ -e $DEV_PATH ];        }
-function cmdInstall   () { sudo insmod $KO_PATH;    }
-function cmdUninstall () { sudo rmmod $DEV_NAME;    }
+function isInstalled  () { [ -e $DEV_PATH ];              }
+function cmdInstall   () { doCmd sudo insmod $KO_PATH;    }
+function cmdUninstall () { doCmd sudo rmmod $DEV_NAME;    }
 
 function cmdAccess () {
     if ! isInstalled; then
@@ -61,17 +62,17 @@ function cmdDriver () {
     for cmd in $@; do
         case "$cmd" in
             makeAll )
-                cmdMake
+                cmdMake || return
                 ;;
             makeClean )
-                cmdMake clean
+                cmdMake clean || return
                 ;;
             install )
                 isMade || cmdMake || return
-                cmdInstall && echo "Info: install driver success"
+                cmdInstall && echo "Info: install driver success" || return
                 ;;
             uninstall )
-                cmdUninstall && echo "Info: uninstall driver success"
+                cmdUninstall && echo "Info: uninstall driver success" || return
                 ;;
             help )
                 echo "Usage: $SCRIPT driver <makeAll|makeClean|install|uninstall> ..."

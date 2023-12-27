@@ -39,6 +39,8 @@ $(MODULE)-objs += frame/kdbg_sec_start.o
 $(MODULE)-objs += frame/kdbg_drv.o
 $(MODULE)-objs += frame/kdbg_lib.o
 $(MODULE)-objs += frame/kdbg_main.o
+$(MODULE)-objs += frame/kdbg_trace.o
+$(MODULE)-objs += frame/kdbg_trace_demo.o
 $(MODULE)-objs += $(EXT_OBJS)
 $(MODULE)-objs += frame/kdbg_sec_stop.o
 

@@ -6,8 +6,8 @@
 #include "zfs_depend_impl.h"
 
 KFUN_IMPORT(zfs, int, spa_open,
-    (const char *, spa_t **, const void *));
-#define spa_open KSYM_REF(zfs,spa_open)
+    (const char *, spa_t **, const void *), 2);
+#define spa_open KSYM_REF(zfs,spa_open,2)
 
 KFUN_IMPORT(zfs, void, spa_close, (spa_t *, const void *));
 #define spa_close KSYM_REF(zfs,spa_close)

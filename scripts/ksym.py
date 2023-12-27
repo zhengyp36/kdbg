@@ -5,37 +5,211 @@ import os
 import sys
 import random
 
-class Kallsyms(object):
-    kallsyms = []
+class MyDict(dict):
+    def __init__(self, init=lambda:[], desc=['tag']):
+        self.init = self._genInit(init, desc)
+        self._order = []
+        super(type(self),self).__init__()
     
-    @classmethod
-    def loadSymTable(cls, update=False):
-        if not cls.kallsyms or update:
-            if os.environ['USER'] != 'root':
-                raise Exception('Run script by root')
-            fd = open('/proc/kallsyms')
-            cls.kallsyms = fd.read().split('\n')
-            fd.close()
-        return cls.kallsyms
+    def _genInit(self, init, desc):
+        self.desc = desc
+        if len(desc) > 1:
+            return lambda:MyDict(init=init, desc=desc[:-1])
+        else:
+            assert(init == None or callable(init))
+            return init
     
-    def addExitCmds(self, cmd):
-        self.exitCmds.append(cmd)
+    def __setitem__(self, key, value):
+        if key not in self:
+            self._order.append(key)
+        super(type(self),self).__setitem__(key, value)
+    
+    def __getitem__(self, key):
+        if key not in self and self.init is not None:
+            self[key] = self.init()
+        return super(type(self),self).__getitem__(key)
+    
+    def __iter__(self):
+        return iter(self._order)
+    
+    def __str__(self):
+        return '[%s] %s' % (
+            ':'.join(self.desc), super(type(self),self).__str__())
+    
+    def keys(self):
+        # Return new list to avoid changing self._order
+        return [i for i in self._order]
+    
+    def __delitem__(self, key):
+        raise AttributeError('Deleting items not allowed')
+    
+    def pop(self, key):
+        raise AttributeError('Popping items not allowed')
+
+class Environ(object):
+    def __getitem__(self, key):
+        if key in os.environ:
+            return os.environ[key]
+        else:
+            return ''
+environ = Environ()
+
+class Shell(object):
+    def __init__(self):
+        self.exitCmds = []
+    
+    def __del__(self):
+        self.doExitCmds()
+    
+    def sysrun(self, cmd, echo=True):
+        if echo:
+            print('$ ' + cmd)
+        return os.system(cmd)
+    
+    def addExitCmds(self, cmds):
+        if isinstance(cmds,str):
+            cmds = [cmds]
+        self.exitCmds += cmds
     
     def doExitCmds(self):
         for cmd in self.exitCmds:
-            os.system(cmd)
+            self.sysrun(cmd)
         self.exitCmds = []
     
-    def shell(self, cmd):
-        rc = os.system(cmd)
-        if rc:
+    def run(self, cmd, throw=True, echo=True):
+        rc = self.sysrun(cmd, echo=echo)
+        if rc and throw:
             self.doExitCmds()
-            raise Exception('Failed to run command {%s}' % cmd)
+            raise Exception('Failed to run command(%s) rc(%d)' % (cmd,rc))
+        return rc
+
+class File(object):
+    @classmethod
+    def read(cls, path):
+        fd = open(path)
+        lines = fd.read().split('\n')
+        fd.close()
+        return lines
     
-    def ksymImportName(self, mod='(\w+)', name='(\w+)', ndx='(\w+)'):
-        return '__ksym_1537_%s_2489_mod_%s_ndx_%s_ffff_' % (name,mod,ndx)
+    @classmethod
+    def write(cls, path, lines=[], mode='w'):
+        fd = open(path, mode)
+        fd.write('\n'.join(lines))
+        fd.close()
+
+class KSym(object):
+    kallsyms = []
     
-    def validSymName(self, name):
+    @classmethod
+    def ksymTable(cls, update=False):
+        if not cls.kallsyms or update:
+            if environ['USER'] != 'root':
+                raise Exception('Run script by root')
+            cls.kallsyms = File.read('/proc/kallsyms')
+        return cls.kallsyms
+    
+    def __init__(self, update=False):
+        self.kallsyms = type(self).ksymTable(update)
+        self.modules = {}
+    
+    def lookupSymbol(self, sym='', mod='', exact=False, getAll=False):
+        mod = self._getMod(self._validModName(mod))
+        modDesc = 'module(%s)' % mod['name']
+        if self._isKernel(mod['name']):
+            modDesc = 'kernel'
+        
+        validSymName = self._validSymName(sym)
+        if not validSymName:
+            raise Exception("Symbol's name(%s) is not supported" % sym)
+        if validSymName not in mod['symtab']:
+            raise Exception('Symbol(%s) not found in %s' % (sym, modDesc))
+        d = mod['symtab'][validSymName]
+        
+        if getAll:
+            addrs = []
+            for s in d:
+                addrs += d[s]
+            return addrs
+        
+        if exact or '.' in sym:
+            if sym not in d:
+                raise Exception('Exact symbol(%s) not found in %s' % (
+                    sym, modDesc))
+            symName = sym
+        else:
+            if len(d) != 1:
+                raise Exception('Too many symbols with name(%s) in %s' % (
+                    sym, modDesc))
+            symName = d.keys()[0]
+        
+        if len(d[symName]) != 1:
+            raise Exception('Too many symbols with same name(%s) in %s' % (
+                symName, modDesc))
+        
+        return d[symName][0]
+    
+    def getSymtab(self, mod):
+        symtab = list(self._getMod(self._validModName(mod))['symtab'].keys())
+        symtab.sort()
+        return symtab
+    
+    def _getMod(self, modName):
+        if modName not in self.modules:
+            self.modules[modName] = self._loadModImpl(modName)
+        return self.modules[modName]
+    
+    def _loadModImpl(self, modName):
+        # Load symbols
+        if self._isKernel(modName):
+            symbols = [sym for sym in self.kallsyms if sym and '[' not in sym]
+        else:
+            pattern = '[%s]' % modName
+            symbols = [sym for sym in self.kallsyms if pattern in sym]
+        
+        # if not symbols:
+            # raise Exception('No symbols found in module(%s)' % modName)
+        
+        # Order symbols
+        #
+        # An example of structure of symtab:
+        #   symtab = {
+        #       'raidz_rec_q_coeff' : {
+        #           'raidz_rec_q_coeff.isra.2' : [
+        #               'ffffffffc0bb8190',
+        #           ]
+        #           'raidz_rec_q_coeff.isra.4' : [
+        #               'ffffffffc0c47170',
+        #               'ffffffffc0c4bb80',
+        #               'ffffffffc0c77ab0',
+        #           ]
+        #           'raidz_rec_q_coeff.isra.3' : [
+        #               'ffffffffc0c9d790',
+        #               'ffffffffc0ca1eb0',
+        #           ]
+        #       }
+        #   }
+        symtab = MyDict(desc=['validSymName','symName'])
+        for sym in symbols:
+            arr = sym.split()
+            addr,symName,validSymName = arr[0],arr[2],self._validSymName(arr[2])
+            if validSymName:
+                symtab[validSymName][symName].append(addr)
+        
+        return {
+            'name' : modName,
+            'symtab' : symtab
+        }
+    
+    def _validModName(self, name):
+        if name:
+            return name
+        else:
+            return '_'
+    
+    def _isKernel(self, name):
+        return self._validModName(name) == '_'
+    
+    def _validSymName(self, name):
         if name.startswith('.'):
             return ''
         elif name.startswith('__func__.'):
@@ -48,276 +222,341 @@ class Kallsyms(object):
             return ''
         else:
             return name.split('.')[0]
-    
-    def get(self, modName):
-        if modName not in self.modules:
-            self.modules[modName] = {
-                'name'       : modName,
-                'list'       : [],
-                'dict'       : {},
-                'importInfo' : {},
-                'listValid'  : False,
-                'dictValid'  : False,
-                'importLoad' : False,
-            }
-        return self.modules[modName]
-    
-    def defaultImportInfo(self):
-        return {
-            'mods' : set(),
-            'ents' : set(),
-            'flag' : None,
+
+class Code(object):
+    def __init__(self, type='', name='', impl=[]):
+        assert(type in ['func', 'macro', 'typedef'])
+        assert(name)
+        assert(isinstance(impl,list))
+        
+        self.desc = {
+            'tag'  : ('%s:%s' % (type,name)),
+            'type' : type,
+            'name' : name,
+            'impl' : impl
         }
     
-    def __init__(self, update=False):
-        self.kallsyms = type(self).loadSymTable(update)
-        self.modules = {}
-        self.config = {}
-        self.exitCmds = []
+    def add(self, impl):
+        if isinstance(impl,str):
+            self.desc['impl'].append(impl)
+        else: # impl is a List
+            self.desc['impl'] += impl
     
-    def load(self, modName):
-        mod = self.get(modName)
-        if not mod['listValid']:
-            if modName == '':
-                mod['list'] = [sym for sym in self.kallsyms if '[' not in sym]
-            else:
-                pat = '[%s]' % modName
-                mod['list'] = [sym for sym in self.kallsyms if pat in sym]
-            mod['listValid'] = True
-        return self
+    def removeLast(self, lineCnt=1):
+        self.desc['impl'] = self.desc['impl'][:-lineCnt]
     
-    def sort(self, modName):
-        mod = self.get(modName)
-        if not mod['listValid']:
-            self.load(modName)
-        if not mod['dictValid']:
-            for sym in mod['list']:
-                arr = sym.split()
-                
-                shortName = self.validSymName(arr[2])
-                if not shortName:
-                    continue
-                
-                if shortName not in mod['dict']:
-                    mod['dict'][shortName] = {}
-                d = mod['dict'][shortName]
-                
-                if arr[2] not in d:
-                    d[arr[2]] = []
-                d[arr[2]].append(arr[0])
-            mod['dictValid'] = True
-        return self
+    def __getitem__(self, key):
+        return self.desc[key]
     
-    def lookupSymbolAddr(self, modName, sym, exact=False):
-        shortName = self.validSymName(sym)
-        mod = self.sort(modName).get(modName)
-        d = mod['dict']
-        
-        if shortName not in d:
-            raise Exception(
-                'Symbol(%s) not found in module(%s)' % (sym, modName))
-        d = d[shortName]
-        
-        if shortName == sym and not exact:
-            if len(d) == 1:
-                addr = d[d.keys()[0]]
-            else:
-                raise Exception(
-                    'More than ONE address for symbol(%s) in module(%s)'
-                    % (sym, modName))
-        else:
-            if sym not in d:
-                raise Exception(
-                    'Symbol(%s) not found in module(%s)' % (sym, modName))
-            addr = d[sym]
-        
-        if len(addr) != 1:
-            raise Exception('More than ONE address for symbol(%s) in module(%s)'
-                % (sym, modName))
-        return addr[0]
+    def __bool__(self):
+        return bool(self.desc['impl'])
+    __nonzero__ = __bool__
     
-    def parseImportInfo(self, modName):
-        mod = self.get(modName)
-        if not mod['listValid']:
-            self.load(modName)
-        
-        if not mod['importLoad']:
-            info,pattern = None,self.ksymImportName()
-            for sym in mod['list']:
-                arr = sym.split()
-                grp = re.search(pattern, arr[2])
-                if grp:
-                    if not info:
-                        info = self.defaultImportInfo()
-                        mod['importInfo'] = info
-                    name,_mod,ndx = grp.groups()
-                    self.addImportInfo(info,_mod,name,ndx)
-                elif arr[2] == '__kdbg_ksym_imported':
-                    if not info:
-                        info = self.defaultImportInfo()
-                        mod['importInfo'] = info
-                    elif info['flag']:
-                        raise Exception('repeat sym(__kdbg_ksym_imported) addr '
-                            + '(%s) vs (%s)' % (info['flag'], arr[0]))
-                    info['flag'] = arr[0]
-            
-            if info and (info['ents'] and not info['flag']):
-                raise Exception(('import symbols(%s) but no ' +
-                    'sym(__kdbg_ksym_imported)') % str(info['ents']))
-            mod['importLoad'] = True
-        
-        return self
+    def __eq__(self, other):
+        return self['impl'] == other['impl']
     
-    def addImportInfo(self, info, _mod, name, ndx):
-        if _mod == '_':
-            _mod = ''
-        if _mod not in info['mods']:
-            self.sort(_mod)
-            info['mods'].add(_mod)
-        
-        ent = '%s:%s:%s' % (_mod,name,ndx)
-        if ent in info['ents']:
-            raise Exception(('repeat importings _mod(%s), name(%s), ndx(%s) '
-                + 'in mod(%s)') % (_mod, name, ndx, modName))
-        
-        info['ents'].add(ent)
+    def __ne__(self, other):
+        return self['impl'] != other['impl']
+
+class CodeForTrace(object):
+    def __init__(self, ksym=KSym()):
+        self.ksym = ksym
     
-    def isModImporting(self, modName):
-        mod = self.get(modName)
-        if not mod['importLoad']:
-            self.parseImportInfo(modName)
-        return ('importInfo' in mod
-            and 'ents' in mod['importInfo']
-            and len(mod['importInfo']['ents']) > 0)
+    def genCodes(self, modules, quiet=True):
+        self.traces = MyDict(desc=['localMod','remoteMod','name'])
+        self.parseModules(modules)
+        if not self.traces:
+            if not quiet:
+                print('No modules need trace.')
+            return []
+        
+        codes = []
+        codes.append(Code(type='macro', name='ARRAY_SIZE', impl=[
+            '#ifndef ARRAY_SIZE',
+            '#define ARRAY_SIZE(arr) (sizeof(arr) / sizeof((arr)[0]))',
+            '#endif',
+        ]))
+        codes.append(Code(type='macro', name='DEF_FUNC', impl=[
+            '#define DEF_FUNC(type,name,addr) type name = (type)0x##addr##UL'
+        ]))
+        codes.append(Code(type='macro', name='DEF_TRACE', impl=[
+            '#define DEF_TRACE(addr) (kdbg_trace_def_t*)0x##addr##UL'
+        ]))
+        codes.append(Code(type='macro', name='REG_TRACE', impl=[
+            '#define REG_TRACE(lmod, rmod, traces, trace_cnt) \\',
+            '\tdo { \\',
+            '\t\tint errcnt; \\',
+            '\t\tunreg_fn(); \\',
+            '\t\terrcnt = reg_fn(rmod,traces); \\',
+            '\t\tprintk("KDBG:KSYM: Register traces module(%s->%s), ' +
+                'total(%ld), errcnt(%d)", \\',
+            '\t\t    lmod, rmod, trace_cnt, errcnt); \\',
+            '\t\torder_fn(); \\',
+            '\t} while (0)'
+        ]))
+        codes.append(Code(type='typedef', name='kdbg_trace_def_t', impl=[
+            'typedef struct kdbg_trace_def kdbg_trace_def_t;'
+        ]))
+        codes.append(Code(type='typedef', name='reg_trace_fn_t', impl=[
+            'typedef int (*reg_trace_fn_t)(const char *, kdbg_trace_def_t**);'
+        ]))
+        codes.append(Code(type='typedef', name='unreg_trace_fn_t', impl=[
+            'typedef int (*unreg_trace_fn_t)(void);'
+        ]))
+        codes.append(Code(type='typedef', name='void_void_fn_t', impl=[
+            'typedef void (*void_void_fn_t)(void);'
+        ]))
+        
+        codes.append(Code(type='func', name='do_trace', impl=[
+            'static void',
+            'do_trace(void)',
+            '{'
+        ]))
+        
+        for localMod in self.traces:
+            self.traceModule(localMod, codes[-1], quiet)
+        
+        codes[-1].add('}')
+        return codes
     
-    def loadConfigFile(self, configFile=''):
-        if configFile:
-            fd = open(configFile)
-            lines = fd.read().split('\n')
-            fd.close()
-        else:
-            lines = []
-        
-        lineNo = 0
-        confPattern = '(\w*):(\w+)([:\d]*)\s*=\s*([\w:\.]+)'
-        addrPattern = '^(0x|0X){0,1}[0-9a-fA-F]+$'
-        
-        for line in lines:
-            lineNo += 1
-            line = line.strip()
-            if not line or line.startswith('#'):
-                continue
-            
-            grp = re.search(confPattern, line)
-            if not grp:
-                msg  = 'Line %d is invalid: %s\n' % (lineNo, line)
-                msg += 'There are THREE valid config formats '
-                msg += 'and examples below:\n'
-                msg += '\tzfs:spa_open   = spa_open.part.5\n'
-                msg += '\tzfs:spa_open:1 = ffffffffc07c9c60\n'
-                msg += '\tzfs:spa_open   = exact:spa_open'
-                raise Exception(msg)
-            
-            _mod,name,ndx,addr = grp.groups()
-            if _mod == '_':
-                _mod = ''
-            if ndx == '':
-                ndx = '0'
-            elif ndx.count(':') != 1:
-                raise Exception
-            else:
-                ndx = ndx.split(':')[1]
-            
-            if addr.startswith('exact:'):
-                exact = True
-                addr = addr.split(':')[1]
-            else:
-                exact = False
-            addr = addr.strip()
-            
-            grp = re.search(addrPattern, addr)
+    def parseModules(self, modules):
+        for modName in modules:
+            self.parseModule(modName)
+    
+    def parseModule(self, localMod):
+        remoteModSet,pattern = set(),self.traceName(flag='ptr')
+        for sym in self.ksym.getSymtab(localMod):
+            grp = re.search(pattern, sym)
             if grp:
-                if addr.startswith('0x') or addr.startswith('0X'):
-                    addr = addr[2:]
-            else:
-                addr = self.lookupSymbolAddr(_mod, addr, exact)
-            
-            key = '%s:%s:%s' % (_mod,name,ndx)
-            if key in self.config and self.config[key] != addr:
-                raise Exception('Line %d: Repeat config %s' % (lineNo, key))
-            self.config[key] = addr
+                remoteModSet.add(grp.groups()[0])
         
-        return self
+        pattern = self.traceName(mod='_', flag='def')
+        for remoteMod in remoteModSet:
+            for sym in self.ksym.getSymtab(remoteMod):
+                grp = re.search(pattern, sym)
+                if grp:
+                    name = grp.groups()[0]
+                    addrs = self.ksym.lookupSymbol(mod=remoteMod, getAll=True,
+                        sym=self.traceName(mod='_', name=name, flag='def'))
+                    self.traces[localMod][remoteMod][name] += addrs
     
-    def loadConfigFiles(self, configFiles=[]):
-        self.config = {}
-        for f in configFiles:
-            self.loadConfigFile(f)
+    def traceModule(self, localMod, code, quiet):
+        if not self.traces[localMod]:
+            if not quiet:
+                print('No traces found in module(%s)' % localMod)
+                return
+        
+        code.add('\t/* module:%s */' % localMod)
+        code.add('\t{')
+        code.add('\t\tDEF_FUNC(void_void_fn_t, order_fn, %s);' %
+            self.ksym.lookupSymbol(mod=localMod, sym='kdbg_trace_update_order'))
+        code.add('\t\tDEF_FUNC(reg_trace_fn_t, reg_fn, %s);' %
+            self.ksym.lookupSymbol(mod=localMod, sym='kdbg_trace_register'))
+        code.add('\t\tDEF_FUNC(unreg_trace_fn_t, unreg_fn, %s);' %
+            self.ksym.lookupSymbol(mod=localMod,
+                sym='kdbg_trace_unregister_all'))
+        code.add('')
+        
+        for remoteMod in self.traces[localMod]:
+            varTracesName = '%s_%s_traces' % (localMod, remoteMod)
+            code.add('\t\tstatic kdbg_trace_def_t *%s[] = {' % varTracesName)
+            for name in self.traces[localMod][remoteMod]:
+                traceDesc = '%s->%s:%s' % (localMod, remoteMod, name)
+                for addr in self.traces[localMod][remoteMod][name]:
+                    code.add('\t\t\tDEF_TRACE(%s), /* %s */' % (addr,traceDesc))
+                    if not quiet:
+                        print('Trace %s: trace-def-addr=%s' % (traceDesc, addr))
+            code.add('\t\t\tDEF_TRACE(0)')
+            code.add('\t\t};')
+            code.add('')
+            code.add('\t\tREG_TRACE("%s", "%s", %s, ARRAY_SIZE(%s)-1);'
+                % (localMod, remoteMod, varTracesName, varTracesName))
+        
+        code.add('\t}')
     
-    def genImportCode(self, modName, configFiles=[]):
-        if not self.isModImporting(modName):
-            return {}
-        
-        self.loadConfigFiles(configFiles)
-        
-        info     = self.get(modName)['importInfo']
-        funcName = 'import_symbols_for_' + modName
-        codes    = []
-        
-        codes.append('static void')
-        codes.append(funcName + '(void)')
-        codes.append('{')
-        codes.append('\tprintk("KDBG:KSYM: Import symbols for %s...\\n");'
-            % modName)
-        codes.append('')
-        
-        for ent in info['ents']:
-            _mod,name,ndx = ent.split(':')
-            _sym = self.ksymImportName(_mod,name,ndx)
-            
-            if ent in self.config:
-                addr = self.config[ent]
-            else:
-                addr = self.lookupSymbolAddr(_mod,name)
-            
-            codes.append('\tprintk("KDBG:KSYM: %s = %s\\n");' % (ent,addr))
-            codes.append('\t*(void**)0x%sUL = (void*)0x%sUL;' % (
-                self.lookupSymbolAddr(modName,_sym), addr))
-            codes.append('')
-        
-        codes.append('\tprintk("KDBG:KSYM: __kdbg_ksym_imported = 1\\n");')
-        codes.append('\t*(int*)0x%sUL = 1;' % info['flag'])
-        codes.append('}')
-        
-        return { 'func' : funcName, 'code' : codes }
+    def traceName(self, mod='(\w+)', name='(\w+)', flag='(\w+)'):
+        return '_kdbg_trace_%s_v1_%s_%s_ff_aa_55_' % (flag,mod,name)
+
+class CodeForImport(object):
+    def __init__(self, ksym=KSym()):
+        self.ksym = ksym
     
-    def usage(self):
-        usage = [
-            '<mod1.ko> [<mod1_1.conf> ...] [<mod2.ko> <mod2.conf> ...]',
-            '<file1.in> [...]'
-        ]
-        contents  = 'Usage: %s ' % self.appname
-        contents += ('\n       %s ' % self.appname).join(usage)
-        print(contents)
+    def genCodes(self, modules, quiet=True):
+        self.modules = modules
+        self.imports = MyDict(
+            desc=['localMod','remoteMod','symName','importNdx'],
+            init=lambda:{'localAddr':'','remoteAddr':''}
+        )
+        
+        for localMod in self.modules:
+            self.parseModule(localMod)
+        if not self.imports:
+            if not quiet:
+                print('No modules import symbols from others')
+            return []
+        
+        codes = [Code(type='func', name='do_import', impl=[
+            'static void',
+            'do_import(void)',
+            '{'
+        ])]
+        
+        cnt = 0
+        self.msgs = []
+        for localMod in self.imports:
+            cnt += self.importModule(localMod, codes[-1])
+        assert(cnt > 0)
+        codes[-1].removeLast() # Remove last one empty line
+        codes[-1].add('}')
+        
+        if not quiet:
+            print('\n'.join(self.msgs))
+        return codes
     
-    def writeFile(self, file, lines):
-        fd = open(file, 'w')
-        fd.write('\n'.join(lines))
-        fd.close()
+    def parseModule(self, localMod):
+        pattern = self.ksymImportName()
+        self.setUsrConf(localMod)
+        for symName in self.ksym.getSymtab(localMod):
+            grp = re.search(pattern, symName)
+            if grp:
+                sym,mod,ndx = grp.groups()
+                self.imports[localMod][mod][sym][ndx] = {
+                    'localAddr' : self.lookupSymbol(mod=localMod,sym=symName),
+                    'remoteAddr' : self.lookupImportSymbol(
+                        mod=mod,sym=sym,ndx=ndx)
+                }
     
-    def doImport(self, mods, codes):
-        if len(mods) > 1:
-            print('Info: There are %d modules need to be imported: %s' % (
-                len(mods), ' '.join(mods)))
+    def importModule(self, localMod, code):
+        msgs = []
+        msgs.append('Import symbols for module %s:' % localMod)
+        code.add('\tprintk("KDBG:KSYM: %s\\n");' % msgs[-1])
+        code.add('')
         
-        rndstr = lambda n : [str(random.randint(100,999)) for i in range(n)]
-        modname = 'ksym_' + '_'.join(rndstr(3))
+        cnt = 0
+        for mod in self.imports[localMod]:
+            for sym in self.imports[localMod][mod]:
+                for ndx in self.imports[localMod][mod][sym]:
+                    info  = self.imports[localMod][mod][sym][ndx]
+                    ent   = 'import %s->%s' % (localMod,':'.join([mod,sym,ndx]))
+                    addr  = info['remoteAddr']
+                    paddr = info['localAddr']
+                    
+                    msgs.append('%s = *(%s) = %s' % (ent, paddr, addr))
+                    code.add('\tprintk("KDBG:KSYM: %s\\n");' % msgs[-1])
+                    code.add('\t*(void**)0x%sUL = (void*)0x%sUL;' % (
+                        paddr, addr))
+                    code.add('')
+                    cnt += 1
         
-        workspace = '/tmp/ksym.' + '.'.join(rndstr(3))
-        self.shell('mkdir ' + workspace)
-        self.addExitCmds('rm -rf ' + workspace)
+        importFlag = '__kdbg_ksym_imported'
+        importAddr = self.lookupSymbol(mod=localMod, sym=importFlag)
         
-        # Generate Makefile
+        msgs.append('%s = *(%s) = 1' % (importFlag, importAddr))
+        code.add('\tprintk("KDBG:KSYM: %s\\n");' % msgs[-1])
+        code.add('\t*(int*)0x%sUL = 1;' % importAddr)
+        code.add('')
+        
+        self.msgs += msgs
+        return cnt
+    
+    def ksymImportName(self, mod='(\w+)', name='(\w+)', ndx='(\w+)'):
+        return '__ksym_1537_%s_2489_mod_%s_ndx_%s_ffff_' % (name,mod,ndx)
+    
+    def lookupImportSymbol(self, mod='', sym='', ndx='0'):
+        key = ':'.join([mod,sym,ndx])
+        if key not in self.usrSymtab:
+            return self.ksym.lookupSymbol(mod=mod, sym=sym)
+        
+        val = self.usrSymtab[key]['val']
+        if val.startswith('addr:'):
+            return val[5:]
+        elif val.startswith('exact:'):
+            return self.ksym.lookupSymbol(mod=mod, sym=val[6:], exact=True)
+        else: # val.startswith('sym:')
+            return self.ksym.lookupSymbol(mod=mod, sym=val[4:])
+    
+    def lookupSymbol(self, mod='', sym='', exact=False):
+        return self.ksym.lookupSymbol(mod=mod, sym=sym, exact=exact)
+    
+    def setUsrConf(self, localMod):
+        self.usrSymtab = {}
+        for usrConf in self.modules[localMod]:
+            lineNo = 0
+            for line in File.read(usrConf):
+                lineNo += 1
+                arr = self.split(line, '=')
+                if len(arr) == 2 and not arr[0].startswith('#'):
+                    self.setSym(arr[0], arr[1], usrConf, lineNo)
+    
+    def setSym(self, symName, symVal, confFile, lineNo):
+        #
+        # Format of symName: '<[modName]:symName[:ndx]>'
+        #
+        arr = self.split(symName, ':') + ['0']
+        assert(len(arr) in [3,4])
+        modName,symName,ndx = arr[0:3]
+        
+        #
+        # Format of symVal: '[exact:]<symName>' or '<addressInHexFormat>'
+        #          valType: 'sym','addr','exact'
+        #
+        valType = 'sym'
+        hexPattern = '^[0-9a-fA-F]+$'
+        
+        if symVal[0:2] in ['0x','0X']:
+            assert(re.match(hexPattern, symVal[2:]))
+            symVal = symVal[2:]
+            valType = 'addr'
+        elif re.match(hexPattern, symVal):
+            valType = 'addr'
+        elif ':' in symVal:
+            arr = self.split(symVal, ':')
+            if arr[0] == 'exact' and len(arr) == 2:
+                valType = 'exact'
+                symVal = arr[1]
+        
+        key,val = ':'.join([modName,symName,ndx]),':'.join([valType,symVal])
+        if key not in self.usrSymtab:
+            self.usrSymtab[key] = {
+                'key'  : key,
+                'val'  : val,
+                'file' : confFile,
+                'line' : lineNo,
+            }
+        elif self.usrSymtab[key]['val'] != val:
+            prev = self.usrSymtab[key]
+            msg  = 'Repeat config name=%s, ' % key
+            msg += 'previous={%s}@[%s,%d], ' % (
+                prev['val'], prev['file'],prev['line'])
+            msg += 'current={%s}@[%s,%d]' % (
+                val, confFile, lineNo)
+            raise Exception(msg)
+    
+    def split(self, s, sep):
+        return [i.strip() for i in s.split(sep)]
+
+class ModMaker(object):
+    def __init__(self):
+        self.clearCodes()
+    
+    def clearCodes(self):
+        self.implements = MyDict()
+    
+    def addCodes(self, codes):
+        for code in codes:
+            if code['tag'] not in self.implements:
+                self.implements[code['tag']] = code
+            elif self.implements[code['tag']] != code:
+                msgs = []
+                msgs.append('Definitions conflict:')
+                msgs.append('=' * 40 + '>>>')
+                msgs += self.implements[code['tag']]['impl']
+                msgs.append('=' * 40 + '...')
+                msgs += code['impl']
+                msgs.append('=' * 40 + '<<<')
+                raise Exception(msgs)
+    
+    def genMakefile(self, path, modname):
         lines = []
         lines.append('ifeq ($(KERNELRELEASE),)')
         lines.append('')
@@ -341,29 +580,25 @@ class Kallsyms(object):
         lines.append('')
         lines.append('endif')
         lines.append('')
-        self.writeFile(workspace + '/Makefile', lines)
-        
-        # Generate C-codes
+        File.write(path, lines)
+    
+    def genCCodes(self, path):
         lines = []
         lines.append('#include <linux/init.h>')
         lines.append('#include <linux/module.h>')
         lines.append('#include <linux/kernel.h>')
         lines.append('')
         
-        funcs = []
-        for mod in mods:
-            code = codes[mod]
-            if code:
-                funcs.append(code['func'])
-                lines += code['code']
-                lines.append('')
+        for tag in self.implements:
+            lines += self.implements[tag]['impl']
+            lines.append('')
         
         lines.append('static int __init')
         lines.append('ksym_drv_init(void)')
         lines.append('{')
         
-        for func in funcs:
-            lines.append('\t%s();' % func)
+        for tag in [f for f in self.implements if f.startswith('func:')]:
+            lines.append('\t%s();' % self.implements[tag]['name'])
         
         lines.append('\treturn (0);')
         lines.append('}')
@@ -381,14 +616,112 @@ class Kallsyms(object):
         lines.append('MODULE_DESCRIPTION("kernel debugger");')
         lines.append('MODULE_VERSION("1.0");')
         lines.append('')
-        self.writeFile(workspace + '/drv.c', lines)
         
-        self.shell('make -C ' + workspace)
-        self.shell('insmod %s/%s.ko' % (workspace, modname))
-        self.addExitCmds('rmmod ' + modname)
-        self.doExitCmds()
+        File.write(path, lines)
+    
+    def run(self):
+        rndstr = lambda n : [str(random.randint(100,999)) for i in range(n)]
+        workspace = '/tmp/ksym.' + '.'.join(rndstr(3))
+        modname = 'ksym_' + '_'.join(rndstr(3))
         
-        print('Import symbols success.')
+        shell = Shell()
+        shell.run('mkdir ' + workspace)
+        if not environ['KSYM_RESERVE_WORKSPACE'] in ['yes','true']:
+            shell.addExitCmds('rm -rf ' + workspace)
+        
+        self.genMakefile(workspace + '/Makefile', modname)
+        self.genCCodes(workspace + '/drv.c')
+        shell.run('make -C ' + workspace)
+        shell.run('insmod %s/%s.ko' % (workspace,modname))
+        shell.run('rmmod %s' % modname)
+
+class Main(object):
+    def __init__(self):
+        self.appname = os.path.basename(sys.argv[0])
+        self.args = sys.argv[1:]
+        self.coders = [CodeForTrace, CodeForImport]
+    
+    def run(self):
+        if len(self.args) == 0:
+            self.usage()
+            sys.exit(0)
+        else:
+            self.parseArgs(self.args).execute()
+    
+    def usage(self):
+        print('Usage: %s <mod>.ko [*.conf ...] [<mod1>.ko *.conf]'
+            % self.appname)
+        print('       %s <path>/<head>.in [<path1>/<head1>.in ...]'
+            % self.appname)
+    
+    def error(self, msg):
+        sys.stderr.write('Error: *** ' + msg + '\n')
+    
+    def parseArgs(self, args):
+        unknown = '*.ko'
+        modName = unknown
+        modules = MyDict()
+        inFiles = MyDict(init=int)
+        
+        for arg in args:
+            if arg.endswith('.ko'):
+                modName = arg[:-3]
+                modules[modName] += []
+            elif arg.endswith('.conf'):
+                modules[modName].append(arg)
+            elif arg.endswith('.in'):
+                inFiles[arg] += 1
+            else:
+                self.error('Invalid args(%s) not *.conf, *.ko, *.in' % arg)
+                self.usage()
+                sys.exit(1)
+        
+        if unknown in modules:
+            self.error('There are some *.conf not given modules: %s' %
+                ' '.join(modules[unknown]))
+            self.usage()
+            sys.exit(1)
+        
+        if modules and inFiles:
+            self.error("It's not allowed both converting *.in and " +
+                "handling *.ko")
+            self.usage()
+            sys.exit(1)
+        
+        self.inFiles = inFiles
+        self.modules = modules
+        
+        return self
+    
+    def execute(self):
+        if self.inFiles:
+            self.genHeader(self.inFiles)
+        
+        if self.modules:
+            self.handleModules()
+    
+    def checkModInserted(self, mod, shell=Shell()):
+        cmd = "lsmod | awk '{print $1}' | grep -w %s >/dev/null" % mod
+        rc = shell.run(cmd, throw=False, echo=False)
+        if rc:
+            self.error('module(%s.ko) is not inserted.' % mod)
+            sys.exit(1)
+    
+    def checkFileExist(self, file):
+        if not os.path.isfile(file):
+            self.error('%s does not exist or is not a file.' % file)
+            sys.exit(1)
+    
+    def handleModules(self):
+        for mod in self.modules:
+            self.checkModInserted(mod)
+            for file in self.modules[mod]:
+                self.checkFileExist(file)
+        
+        maker = ModMaker()
+        for coder in self.coders:
+            maker.addCodes(coder().genCodes(self.modules))
+        maker.run()
     
     def parseModulesFromInFile(self, inFile):
         fd = open(inFile)
@@ -403,7 +736,7 @@ class Kallsyms(object):
                 insmodList.append('mod -s ' + grp.groups()[0])
         return insmodList
     
-    def genHeader(self, inFiles=[]):
+    def genHeader(self, inFiles=[], shell=Shell()):
         self.inFiles,self.outFiles = [],[]
         for f in inFiles:
             if f in self.inFiles:
@@ -429,11 +762,12 @@ class Kallsyms(object):
         
         rndstr = lambda n : [str(random.randint(100,999)) for i in range(n)]
         cmdFile = '/tmp/ksym.crash.' + '_'.join(rndstr(3)) + '.txt'
-        self.addExitCmds('rm -f ' + cmdFile)
-        self.writeFile(cmdFile, lines)
+        shell.addExitCmds('rm -f ' + cmdFile)
+        File.write(cmdFile, lines)
         
-        self.shell('crash -i ' + cmdFile)
-        self.doExitCmds()
+        shell.run('crash -i ' + cmdFile)
+        print('')
+        shell.doExitCmds()
         
         for f in self.outFiles:
             if not os.path.isfile(f):
@@ -443,63 +777,10 @@ class Kallsyms(object):
             fd = open(f)
             lines = fd.read().replace('...','char dummy[1];').split('\n')
             fd.close()
-            self.writeFile(f, lines)
             
-        print('\nGenerate %d headers success.' % len(self.outFiles))
-    
-    def run(self):
-        self.appname = os.path.basename(sys.argv[0])
-        if len(sys.argv) > 1:
-            allInFiles = True
-            for f in sys.argv[1:]:
-                if not f.endswith('.in'):
-                    allInFiles = False
-                    break
-            if allInFiles:
-                self.genHeader(sys.argv[1:])
-                sys.exit(0)
-        
-        if len(sys.argv) == 1:
-            self.usage()
-            sys.exit(0)
-        elif not sys.argv[1].endswith('.ko'):
-            print("Error: *** Argument 1 '%s' is not <mod>.ko" % sys.argv[1])
-            self.usage()
-            sys.exit(1)
-        
-        mod,confs,modList = '',{},[]
-        for arg in sys.argv[1:]:
-            if arg.endswith('.ko'):
-                mod = arg.split('.ko')[0]
-                if mod not in confs:
-                    confs[mod] = set()
-                    modList.append(mod)
-            elif arg.endswith('.conf'):
-                confs[mod].add(arg)
-            else:
-                print("Error: *** invalid arg '%s'" % arg)
-                sys.exit(1)
-        
-        importMods,importCodes = [],{}
-        for mod in modList:
-            code = self.genImportCode(mod, confs[mod])
-            if code:
-                importMods.append(mod)
-                importCodes[mod] = code
-        
-        if not importMods:
-            print('Warning: *** No modules need to be imported.')
-            sys.exit(0)
-        else:
-            self.doImport(importMods, importCodes)
+            File.write(f, lines)
+            
+        print('Generate %d headers success.' % len(self.outFiles))
 
 if __name__ == '__main__':
-    if os.environ['USER'] != 'root':
-        cmd = 'sudo ' + ' '.join(sys.argv)
-        print('$ ' + cmd)
-        rc = os.system(cmd)
-        if rc != 0 and (rc & 0xFF) == 0:
-            rc = 1
-        sys.exit(rc)
-    else:
-        Kallsyms().run()
+    Main().run()
