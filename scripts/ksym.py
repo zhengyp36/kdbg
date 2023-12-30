@@ -385,11 +385,25 @@ class CodeForImport(object):
                 print('No modules import symbols from others')
             return []
         
-        codes = [Code(type='func', name='do_import', impl=[
+        codes = [Code(type='typedef', name='kdbg_hold_module_fn_t', impl=[
+            'typedef int (*kdbg_hold_module_fn_t)(const char *mod_name);'
+        ])]
+        codes.append(Code(type='macro', name='CALL_HOLD_MODULE', impl=[
+            '#define CALL_HOLD_MODULE(mod,addr)' + '\t'*5 + '\\',
+            '\t(((kdbg_hold_module_fn_t)0x##addr##UL)(#mod))'
+        ]))
+        codes.append(Code(type='macro', name='ASSIGN_SYMBOL_ADDR', impl=[
+            '#define ASSIGN_SYMBOL_ADDR(lmod,rmod,name,ndx,laddr,raddr)\t\t\\',
+            '\tprintk("KDBG:KSYM: import "#lmod"->"#rmod":"#name":"#ndx\t\\',
+            '\t    " = *("#laddr") = ("#raddr")\\n");\t\t\t\t\\',
+            '\t*(void**)0x##laddr##UL = (void*)0x##raddr##UL'
+        ]))
+        
+        codes.append(Code(type='func', name='do_import', impl=[
             'static void',
             'do_import(void)',
             '{'
-        ])]
+        ]))
         
         cnt = 0
         self.msgs = []
@@ -418,32 +432,50 @@ class CodeForImport(object):
     
     def importModule(self, localMod, code):
         msgs = []
-        msgs.append('Import symbols for module %s:' % localMod)
-        code.add('\tprintk("KDBG:KSYM: %s\\n");' % msgs[-1])
+        
+        importFlag = '__kdbg_ksym_imported'
+        importAddr = self.lookupSymbol(mod=localMod, sym=importFlag)
+        msgs.append('%s:&%s = (int*)0x%s' % (localMod, importFlag, importAddr))
+        
+        holdFunc = 'kdbg_hold_module'
+        holdAddr = self.lookupSymbol(mod=localMod, sym=holdFunc)
+        msgs.append('%s:&%s = (int*)0x%s' % (localMod, holdFunc, holdAddr))
+        
+        code.add('\t/* Import symbols for module(%s) */' % localMod)
+        code.add('\tdo {')
+        code.add('\t\tint *imported = (int*)0x%sUL;' % importAddr)
+        code.add('\t\tif (*imported) {')
+        code.add('\t\t\tprintk("KDBG:KSYM: module(kdbg) is ' +
+            'already imported\\n");')
+        code.add('\t\t\tbreak;')
+        code.add('\t\t}')
         code.add('')
         
         cnt = 0
         for mod in self.imports[localMod]:
+            code.add('\t\t/* Import symbols from module(%s) */' % mod)
+            code.add('\t\tif (!CALL_HOLD_MODULE(%s,%s)) {' % (mod,holdAddr))
+            code.add('\t\t\tprintk("KDBG:KSYM: Failed to hold module(' +
+                mod + ') by module(' + localMod + ')\\n");')
+            code.add('\t\t\tbreak;')
+            code.add('\t\t}')
+            code.add('')
+            
             for sym in self.imports[localMod][mod]:
                 for ndx in self.imports[localMod][mod][sym]:
-                    info  = self.imports[localMod][mod][sym][ndx]
-                    ent   = 'import %s->%s' % (localMod,':'.join([mod,sym,ndx]))
-                    addr  = info['remoteAddr']
-                    paddr = info['localAddr']
-                    
-                    msgs.append('%s = *(%s) = %s' % (ent, paddr, addr))
-                    code.add('\tprintk("KDBG:KSYM: %s\\n");' % msgs[-1])
-                    code.add('\t*(void**)0x%sUL = (void*)0x%sUL;' % (
-                        paddr, addr))
-                    code.add('')
+                    info = self.imports[localMod][mod][sym][ndx]
+                    code.add('\t\tASSIGN_SYMBOL_ADDR(%s, %s, %s, %s, %s, %s);'
+                        % (localMod, mod, sym, ndx,
+                            info['localAddr'], info['remoteAddr']))
+                    msgs.append('%s->%s:%s:%s = *(%s) = (%s)' % (localMod, mod,
+                        sym, ndx, info['localAddr'], info['remoteAddr']))
                     cnt += 1
+            code.add('')
         
-        importFlag = '__kdbg_ksym_imported'
-        importAddr = self.lookupSymbol(mod=localMod, sym=importFlag)
-        
-        msgs.append('%s = *(%s) = 1' % (importFlag, importAddr))
-        code.add('\tprintk("KDBG:KSYM: %s\\n");' % msgs[-1])
-        code.add('\t*(int*)0x%sUL = 1;' % importAddr)
+        code.add('\t\tprintk("KDBG:KSYM: ' + localMod +
+            ':__kdbg_ksym_imported = *(' + importAddr + ') = 1\\n");')
+        code.add('\t\t*imported = 1;')
+        code.add('\t} while (0);')
         code.add('')
         
         self.msgs += msgs

@@ -22,6 +22,7 @@ typedef struct {
 	kdbg_trace_imp_t *	head;
 	int			trace_cnt;
 	int			inited;
+	int			global_enable_cnt;
 } trace_mgr_t;
 
 #define mgr_lock(mgr)   mutex_lock(&(mgr)->mtx)
@@ -352,6 +353,35 @@ add_trace(kdbg_trace_def_list_t *list,
 	return (1);
 }
 
+static void
+global_enable_cnt_inc(void)
+{
+	// Assume mgr->mtx is locked
+	trace_mgr_t *mgr = &trace_mgr;
+	if (mgr->global_enable_cnt == 0) {
+		if (kdbg_hold_module(KDBG_THIS_MODULE)) {
+			kdbg_log("Current module is held");
+			mgr->global_enable_cnt++;
+		}
+	} else if (mgr->global_enable_cnt > 0) {
+		mgr->global_enable_cnt++;
+	}
+}
+
+static void
+global_enable_cnt_dec(void)
+{
+	// Assume mgr->mtx is locked
+	trace_mgr_t *mgr = &trace_mgr;
+	if (mgr->global_enable_cnt > 0) {
+		mgr->global_enable_cnt--;
+		if (mgr->global_enable_cnt == 0) {
+			kdbg_log("Current module is released");
+			kdbg_rele_module(KDBG_THIS_MODULE);
+		}
+	}
+}
+
 static inline void
 enable_trace(kdbg_trace_def_t *def)
 {
@@ -359,6 +389,7 @@ enable_trace(kdbg_trace_def_t *def)
 	if (!def->call && def->impl && def->impl->call) {
 		def->call = def->impl->call;
 		def->impl->defs.enable_cnt++;
+		global_enable_cnt_inc();
 	}
 }
 
@@ -368,6 +399,7 @@ disable_trace(kdbg_trace_def_t *def)
 	if (def->call && def->impl && def->impl->defs.enable_cnt > 0) {
 		def->impl->defs.enable_cnt--;
 		def->call = NULL;
+		global_enable_cnt_dec();
 	}
 }
 
@@ -433,11 +465,7 @@ register_traces(trace_mgr_t *mgr, const char *mod, kdbg_trace_def_t **defs,
 
 	if (r->ok_cnt > 0 || r->hang_cnt > 0) {
 		imp = *where_mod;
-		if (!imp->hold_mod) {
-			// TODO: do not hold current module itself
-			// TODO: hold the reference of the module
-			imp->hold_mod = 1;
-		}
+		imp->registered = 1;
 	}
 
 #undef FMT_TRACE_DEF
@@ -493,10 +521,7 @@ unregister_traces(trace_mgr_t *mgr, const char *mod)
 	for (imp = imp_mod; !!imp; imp = (kdbg_trace_imp_t *)imp->head.next)
 		cnt += clear_all_traces(imp);
 
-	if (imp_mod->hold_mod) {
-		// TODO: release the reference of the module
-		imp_mod->hold_mod = 0;
-	}
+	imp_mod->registered = 0;
 
 	return (cnt);
 }
@@ -719,24 +744,79 @@ kdbg_trace_init(void)
 	mgr_unlock(mgr);
 }
 
+static int repeat_register_allowed = 0;
+
+static inline int
+hold_mod_during_register(const char *mod)
+{
+	return (!strcmp(kdbg_local_module_name(), mod) ||
+	    kdbg_hold_module(mod));
+}
+
+static inline void
+rele_mod_during_register(const char *mod)
+{
+	if (strcmp(kdbg_local_module_name(), mod) != 0)
+		kdbg_rele_module(mod);
+}
+
 int
 kdbg_trace_register(const char *mod, kdbg_trace_def_t **defs)
 {
-	int changed = 0;
+	int defs_cnt = 0;
+	for (kdbg_trace_def_t **pdef = defs; *pdef; pdef++)
+		defs_cnt++;
+
+	if (defs_cnt == 0)
+		return (0);
 
 	trace_mgr_t *mgr = &trace_mgr;
 	mgr_lock(mgr);
-	changed |= !!unregister_traces(mgr, mod);
+
+	kdbg_trace_imp_t *imp_mod = imp_lookup(mgr, mod,
+	    TRACE_NAME_FOR_MOD, NULL, NULL);
+	if (!imp_mod) {
+		mgr_unlock(mgr);
+		kdbg_log("Error: *** imp of module(%s) is not found", mod);
+		return (defs_cnt);
+	}
+
+	if (!repeat_register_allowed && imp_mod->registered) {
+		kdbg_log("Error: *** module(%s) is already registered", mod);
+		mgr_unlock(mgr);
+		return (defs_cnt);
+	}
+
+	if (!hold_mod_during_register(mod)) {
+		kdbg_log("Error: *** Failed to hold module(%s)", mod);
+		mgr_unlock(mgr);
+		return (defs_cnt);
+	}
+
+	int changed = !!unregister_traces(mgr, mod);
 
 	register_stat_t r;
 	register_traces(mgr, mod, defs, &r);
-	changed |= r.ok_cnt > 0 || r.hang_cnt > 0;
+	if (r.ok_cnt > 0 || r.hang_cnt > 0)
+		changed = 1;
+	else
+		rele_mod_during_register(mod);
 
 	if (changed)
 		trace_order(mgr);
 	mgr_unlock(mgr);
 
 	return (r.hang_cnt ? r.hang_cnt : -!!r.err_cnt);
+}
+
+static void
+unregister_all_traces(trace_mgr_t *mgr)
+{
+	kdbg_trace_imp_t *imp;
+	for (imp = mgr->head; imp; imp = imp->next_mod)
+		if (unregister_traces(mgr, imp->mod))
+			rele_mod_during_register(imp->mod);
+	trace_order(mgr);
 }
 
 #define TRACE_USAGE "<dump|enable|disable|cleanup> [traces]"
@@ -1097,6 +1177,20 @@ cmd_disable_trace(trace_arr_t *arr)
 }
 
 static void
+cmd_cleanup(trace_arr_t *arr)
+{
+	trace_mgr_t *mgr = arr->mgr;
+	if (arr->arr_cnt != mgr->trace_cnt) {
+		kdbg_print(arr->inst, "Error: *** "
+		    "cleanup is not supported for partial traces.\n");
+		const char *cmd = "kdbg.sh access trace cleanup ALL";
+		kdbg_print(arr->inst, "You can enter the command '%s'\n", cmd);
+	} else {
+		unregister_all_traces(mgr);
+	}
+}
+
+static void
 exec_cmd(trace_args_t *args, trace_arr_t *arr)
 {
 	switch (args->cmd_no) {
@@ -1113,7 +1207,7 @@ exec_cmd(trace_args_t *args, trace_arr_t *arr)
 		break;
 
 	case TRACE_CMD_CLEANUP:
-		kdbg_print(arr->inst, "Error: *** cleanup not implement\n");
+		cmd_cleanup(arr);
 		break;
 
 	default:

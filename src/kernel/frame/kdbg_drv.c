@@ -3,6 +3,7 @@
 #include <sys/kdbg_impl.h>
 #include <sys/kdbg_trace_impl.h>
 #include <linux/fs.h>
+#include <linux/slab.h>
 #include <linux/cdev.h>
 #include <linux/init.h>
 #include <linux/device.h>
@@ -217,54 +218,6 @@ drv_ctrl_fini(void)
 	});
 }
 
-typedef struct modref {
-	struct mutex mtx;
-	int ref;
-} modref_t;
-
-static modref_t kdbg_modref = {
-	.mtx = __MUTEX_INITIALIZER(kdbg_modref.mtx),
-	.ref = 0
-};
-
-int
-kdbg_mod_get(void)
-{
-	modref_t *ref = &kdbg_modref;
-	mutex_lock(&ref->mtx);
-	if (ref->ref == 0)
-		try_module_get(THIS_MODULE);
-	ref->ref++;
-	int val = ref->ref;
-	mutex_unlock(&ref->mtx);
-	return (val);
-}
-
-int
-kdbg_mod_put(void)
-{
-	modref_t *ref = &kdbg_modref;
-	mutex_lock(&ref->mtx);
-	if (ref->ref > 0) {
-		ref->ref--;
-		if (ref->ref == 0)
-			module_put(THIS_MODULE);
-	}
-	int val = ref->ref;
-	mutex_unlock(&ref->mtx);
-	return (val);
-}
-
-int
-kdbg_mod_ref(void)
-{
-	modref_t *ref = &kdbg_modref;
-	mutex_lock(&ref->mtx);
-	int val = ref->ref;
-	mutex_unlock(&ref->mtx);
-	return (val);
-}
-
 static int __init
 kdbg_drv_init(void)
 {
@@ -282,12 +235,185 @@ kdbg_drv_init(void)
 	return (0);
 }
 
+static void kdbg_rele_all_modules(void);
+
 static void __exit
 kdbg_drv_exit(void)
 {
+	kdbg_rele_all_modules();
 	drv_ctrl_fini();
 	drv_inst_free(default_drv_inst);
 	kdbg_log("kdbg(name:%s) exit", KDBG_DEVNAME);
+}
+
+#ifndef offsetof
+#define offsetof(s,m) ((size_t)&((s*)0)->m)
+#endif
+
+typedef struct mod_ref {
+	struct mod_ref *	next;
+	uint32_t		ref;
+	char			name[1];
+} mod_ref_t;
+
+typedef struct mod_mgr {
+	struct mutex		mtx;
+	mod_ref_t *		head;
+	uint32_t		local_ref;
+} mod_mgr_t;
+
+static mod_ref_t *
+get_mod_ref(mod_mgr_t *mgr, const char *mod_name, mod_ref_t ***where, int alloc)
+{
+	mod_ref_t **iter;
+	for (iter = &mgr->head; *iter; iter = &(*iter)->next)
+		if (!strcmp((*iter)->name, mod_name))
+			return (*(*where = iter));
+
+	if (!alloc) {
+		*where = NULL;
+		return (NULL);
+	}
+
+	int namelen = strlen(mod_name) + 1;
+	*iter = kmalloc(offsetof(mod_ref_t,name[namelen]), GFP_KERNEL);
+	if (*iter) {
+		mod_ref_t *modref = *iter;
+		modref->next = NULL;
+		modref->ref = 0;
+		memcpy(modref->name, mod_name, namelen);
+		*where = iter;
+	} else {
+		kdbg_log("Failed to alloc mod_ref for module(%s)", mod_name);
+		*where = NULL;
+	}
+
+	return (*iter);
+}
+
+static void
+put_mod_ref(mod_ref_t **where)
+{
+	if (!where || (*where)->ref > 0)
+		return;
+	else {
+		mod_ref_t *modref = *where;
+		*where = NULL;
+		kfree(modref);
+	}
+}
+
+static int
+hold_module(mod_mgr_t *mgr, const char *mod_name)
+{
+	if (mod_name == KDBG_THIS_MODULE) {
+		int ok = !!try_module_get(THIS_MODULE);
+		mgr->local_ref += ok;
+		return (ok);
+	}
+
+	if (!strcmp(mod_name, KDBG_DEVNAME)) {
+		kdbg_log("Error: *** getting local module(%s) is forbidden.",
+		    mod_name);
+		return (0);
+	}
+
+	mod_ref_t **where;
+	if (!get_mod_ref(mgr, mod_name, &where, 1))
+		return (0);
+
+	struct module *mod = find_module(mod_name);
+	if (!mod) {
+		put_mod_ref(where);
+		kdbg_log("Error: *** Failed to find module(%s)\n", mod_name);
+		return (0);
+	}
+
+	mod_ref_t *modref = *where;
+	int ok = !!try_module_get(mod);
+	modref->ref += ok;
+	put_mod_ref(where);
+	return (ok);
+}
+
+static void
+rele_module(mod_mgr_t *mgr, const char *mod_name)
+{
+	if (mod_name == KDBG_THIS_MODULE) {
+		if (mgr->local_ref > 0) {
+			module_put(THIS_MODULE);
+			mgr->local_ref--;
+		}
+		return;
+	}
+
+	mod_ref_t **where;
+	if (get_mod_ref(mgr, mod_name, &where, 0)) {
+		mod_ref_t *modref = *where;
+		if (modref->ref > 0) {
+			struct module *mod = find_module(mod_name);
+			if (mod)
+				module_put(mod);
+			modref->ref--;
+		}
+		put_mod_ref(where);
+	}
+}
+
+static mod_mgr_t mod_mgr = {
+	.mtx = __MUTEX_INITIALIZER(mod_mgr.mtx)
+};
+
+int
+kdbg_hold_module(const char *mod_name)
+{
+	mod_mgr_t *mgr = &mod_mgr;
+
+	mutex_lock(&mgr->mtx);
+	int ok = hold_module(mgr, mod_name);
+	mutex_unlock(&mgr->mtx);
+
+	return (ok);
+}
+
+void
+kdbg_rele_module(const char *mod_name)
+{
+	mod_mgr_t *mgr = &mod_mgr;
+
+	mutex_lock(&mgr->mtx);
+	rele_module(mgr, mod_name);
+	mutex_unlock(&mgr->mtx);
+}
+
+const char *
+kdbg_local_module_name(void)
+{
+	return (KDBG_DEVNAME);
+}
+
+static void
+kdbg_rele_all_modules(void)
+{
+	mod_mgr_t *mgr = &mod_mgr;
+	struct module *mod;
+	mod_ref_t *modref;
+
+	/* Note: not release references of THIS_MODULE because
+	 * kdbg_drv_exit() would not be called if THIS_MODULE is in use
+	 * and this function is called in kdbg_drv_exit()
+	 */
+	while (!!(modref = mgr->head)) {
+		mgr->head = modref->next;
+		mod = find_module(modref->name);
+		if (mod) {
+			while (modref->ref > 0) {
+				module_put(mod);
+				modref->ref--;
+			}
+		}
+		kfree(modref);
+	}
 }
 
 module_init(kdbg_drv_init);

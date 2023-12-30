@@ -34,7 +34,7 @@ typedef struct kdbg_trace_imp {
 	const char * const		file;
 	struct kdbg_trace_imp *		next_mod;
 	struct kdbg_trace_imp *		curr_mod;
-	int				hold_mod;
+	int				registered;
 } kdbg_trace_imp_t;
 
 /* This function will never be called. But if 'head' was not the first

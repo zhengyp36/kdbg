@@ -1,6 +1,6 @@
 #!/bin/bash
 
-DEV_NAME=kdbg
+DEV_NAME=kdbg; [ -z "$target" ] || DEV_NAME=$target
 DEV_PATH=/dev/$DEV_NAME
 SRC_PATH=$(dirname $0)/../src/kernel
  KO_PATH=$SRC_PATH/${DEV_NAME}.ko
@@ -94,6 +94,7 @@ function usage () {
     echo "        spa_demo_enable=true"
     echo "      trace_demo_enable=true"
     echo "      update_zfs_depend=false"
+    echo "       target=<kdbgx:1,2,...>"
 }
 
 function Main () {
