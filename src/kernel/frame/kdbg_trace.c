@@ -67,6 +67,17 @@ typedef struct trace_args {
 	char **	traces_arr;
 } trace_args_t;
 
+typedef struct trace_array {
+	trace_mgr_t *		mgr;
+	drv_inst_t *		inst;
+	kdbg_trace_head_t **	arr;
+	int			is_empty;
+	int			arr_cnt;
+	int			max_arr_cnt;
+	int			locked;
+	int			err;
+} trace_arr_t;
+
 enum {
 	DUMP_TRACE_ID,
 	DUMP_NAME,
@@ -90,7 +101,7 @@ enum {
 #define DUMP_NAME_BUF_LEN 128
 typedef struct dump_ctx {
 	drv_inst_t *	inst;
-	trace_args_t *	args;
+	trace_arr_t *	trace_arr;
 	const char *	sep;
 	const char *	invstr;
 	int		stat_max_len;
@@ -341,7 +352,6 @@ add_trace(kdbg_trace_def_list_t *list,
 	return (1);
 }
 
-#ifdef OPEN_KDBG_TRACE_IGNORE_CODE
 static inline void
 enable_trace(kdbg_trace_def_t *def)
 {
@@ -351,7 +361,6 @@ enable_trace(kdbg_trace_def_t *def)
 		def->impl->defs.enable_cnt++;
 	}
 }
-#endif // OPEN_KDBG_TRACE_IGNORE_CODE
 
 static inline void
 disable_trace(kdbg_trace_def_t *def)
@@ -435,6 +444,43 @@ register_traces(trace_mgr_t *mgr, const char *mod, kdbg_trace_def_t **defs,
 #undef VAL_TRACE_DEF
 }
 
+static void
+dump_single_trace(dump_ctx_t *ctx, kdbg_trace_head_t *trace)
+{
+	drv_inst_t *inst = ctx->inst;
+	if (trace->type == KDBG_TRACE_DEF) {
+		kdbg_trace_def_t *def = (kdbg_trace_def_t *)trace;
+		snprintf(ctx->namebuf, sizeof(ctx->namebuf), "%s:%s",
+		    def->impl->mod, def->name);
+		kdbg_print(inst, "Details of Single-Trace [DEF]:\n");
+		kdbg_print(inst, "------------------------------\n");
+		kdbg_print(inst, "[%-8s] %d\n", DUMP_TITLE_TRACE_ID, trace->id);
+		kdbg_print(inst, "[%-8s] %s\n", DUMP_TITLE_NAME,  ctx->namebuf);
+		kdbg_print(inst, "[%-8s] %d\n", DUMP_TITLE_ARGC,     def->argc);
+		kdbg_print(inst, "[%-8s] %s\n", DUMP_TITLE_ENABLE,
+		                                           bool2str(def->call));
+		kdbg_print(inst, "[%-8s] %s:%d\n",
+		                                DUMP_TITLE_FUNC,     def->func,
+		                                                     def->line);
+		kdbg_print(inst, "[%-8s] %s:%d\n",
+		                                DUMP_TITLE_FILE,     def->file,
+		                                                     def->line);
+		kdbg_print(inst, "[%-8s] %s:%d\n", "IMPL",     def->impl->file,
+		                                               def->impl->line);
+	} else { // trace->type == KDBG_TRACE_IMP
+		kdbg_trace_imp_t *imp = (kdbg_trace_imp_t *)trace;
+		snprintf(ctx->namebuf, sizeof(ctx->namebuf), "%s:%s",
+		    imp->mod, imp->name);
+		kdbg_print(inst, "Details of Single-Trace [IMP]:\n");
+		kdbg_print(inst, "------------------------------\n");
+		kdbg_print(inst, "[%-7s] %d\n", DUMP_TITLE_TRACE_ID, trace->id);
+		kdbg_print(inst, "[%-7s] %s\n", DUMP_TITLE_NAME,  ctx->namebuf);
+		kdbg_print(inst, "[%-7s] %d\n", DUMP_TITLE_ARGC,     imp->argc);
+		kdbg_print(inst, "[%-7s] %s:%d\n",
+		                                "File",   imp->file, imp->line);
+	}
+}
+
 static int
 unregister_traces(trace_mgr_t *mgr, const char *mod)
 {
@@ -456,10 +502,10 @@ unregister_traces(trace_mgr_t *mgr, const char *mod)
 }
 
 static void
-dump_ctx_init(dump_ctx_t *ctx, drv_inst_t *inst, trace_args_t *args)
+dump_ctx_init(dump_ctx_t *ctx, drv_inst_t *inst, trace_arr_t *arr)
 {
 	ctx->inst		= inst;
-	ctx->args		= args;
+	ctx->trace_arr		= arr;
 	ctx->sep		= "    ";
 	ctx->invstr		= "--";
 	ctx->stat_max_len	= 0;
@@ -532,11 +578,9 @@ dump_stat_by_trace(dump_ctx_t *ctx, kdbg_trace_head_t *trace)
 static void
 dump_stat_all_traces(trace_mgr_t *mgr, dump_ctx_t *ctx)
 {
-	trace_iter_t iter;
-	kdbg_trace_head_t *trace;
-
 	dump_stat_by_title(ctx);
-	for_each_trace(mgr, &iter, trace) {
+	for (int i = 0; i < ctx->trace_arr->arr_cnt; i++) {
+		kdbg_trace_head_t *trace = ctx->trace_arr->arr[i];
 		dump_stat_by_trace(ctx, trace);
 	}
 }
@@ -631,28 +675,30 @@ dump_trace_info_by_trace(dump_ctx_t *ctx, kdbg_trace_head_t *trace)
 static void
 dump_show_all_traces(trace_mgr_t *mgr, dump_ctx_t *ctx, int stat_max_len)
 {
-	trace_iter_t iter;
-	kdbg_trace_head_t *trace;
 	ctx->stat_max_len = stat_max_len;
-
 	dump_trace_info_by_title(ctx);
-	for_each_trace(mgr, &iter, trace) {
+	for (int i = 0; i < ctx->trace_arr->arr_cnt; i++) {
+		kdbg_trace_head_t *trace = ctx->trace_arr->arr[i];
 		dump_trace_info_by_trace(ctx, trace);
 	}
 }
 
 static void
-dump_traces(drv_inst_t *inst, trace_mgr_t *mgr, trace_args_t *args)
+dump_traces(trace_arr_t *arr)
 {
+	drv_inst_t *inst = arr->inst;
+	trace_mgr_t *mgr = arr->mgr;
+
 	dump_ctx_t *ctx = kmalloc(sizeof(*ctx), GFP_KERNEL);
 	if (!ctx) {
 		kdbg_print(inst, "Out of memory\n");
 		return;
 	}
-	dump_ctx_init(ctx, inst, args);
+	dump_ctx_init(ctx, inst, arr);
 
-	mgr_lock(mgr);
-	if (mgr->trace_cnt > 0) {
+	if (arr->arr_cnt == 1) {
+		dump_single_trace(ctx, arr->arr[0]);
+	} else if (arr->arr_cnt > 1) {
 		dump_stat_all_traces(mgr, ctx);
 		dump_gen_format(ctx);
 		dump_show_all_traces(mgr, ctx, 1); // stat max len of all lines
@@ -661,7 +707,6 @@ dump_traces(drv_inst_t *inst, trace_mgr_t *mgr, trace_args_t *args)
 		kdbg_print(inst, "No trace-points definitions.\n");
 	}
 
-	mgr_unlock(mgr);
 	kfree(ctx);
 }
 
@@ -764,12 +809,337 @@ trace_parse_args(trace_args_t *args, drv_inst_t *inst, int argc, char *argv[])
 	return (0);
 }
 
+static int
+trace_arr_init(trace_arr_t *arr, drv_inst_t *inst, trace_mgr_t *mgr)
+{
+	arr->mgr	 = mgr;
+	arr->inst	 = inst;
+	arr->arr	 = NULL;
+	arr->arr_cnt	 = 0;
+	arr->max_arr_cnt = 0;
+	arr->err	 = 0;
+
+	mgr_lock(mgr);
+	arr->locked = 1;
+	arr->is_empty = !mgr->trace_cnt;
+
+	if (arr->is_empty) {
+		arr->locked = 0;
+		mgr_unlock(mgr);
+		return (0);
+	}
+
+	arr->max_arr_cnt = mgr->trace_cnt;
+	arr->arr = kmalloc(sizeof(arr->arr[0]) * arr->max_arr_cnt, GFP_KERNEL);
+	if (!arr->arr) {
+		arr->locked = 0;
+		mgr_unlock(mgr);
+		return (-1);
+	}
+
+	return (0);
+}
+
+static int
+str2u64(const char *str, uint64_t *out)
+{
+	uint64_t r = 0;
+	int cnt = 0;
+
+	while (*str) {
+		if (*str >= '0' && *str <= '9') {
+			r = r * 10 + (*str - '0');
+			cnt++;
+			str++;
+		} else {
+			return (-1);
+		}
+	}
+
+	if (out)
+		*out = r;
+	return (cnt > 0 ? 0 : -1);
+}
+
+static void
+fill_single_trace(trace_arr_t *arr, kdbg_trace_head_t *trace)
+{
+	for (int i = 0; i < arr->arr_cnt; i++)
+		if (arr->arr[i] == trace)
+			return;
+
+	if (arr->arr_cnt >= arr->max_arr_cnt) {
+		kdbg_print(arr->inst, "Error: *** trace_array is full\n");
+		arr->err = -1;
+		return;
+	}
+
+	arr->arr[arr->arr_cnt++] = trace;
+}
+
+static int
+fill_all(trace_arr_t *arr)
+{
+	trace_iter_t iter;
+	kdbg_trace_head_t *trace;
+	for_each_trace(arr->mgr, &iter, trace) {
+		if (arr->arr_cnt >= arr->max_arr_cnt) {
+			kdbg_print(arr->inst,
+			    "Error: *** fill all but trace_array is full\n");
+			arr->err = -1;
+			break;
+		}
+		arr->arr[arr->arr_cnt++] = trace;
+	}
+
+	return (arr->err);
+}
+
+static void
+fill_trace_by_id(trace_arr_t *arr, uint64_t id)
+{
+	trace_iter_t iter;
+	kdbg_trace_head_t *trace;
+	for_each_trace(arr->mgr, &iter, trace) {
+		if (trace->id == id) {
+			fill_single_trace(arr, trace);
+			return;
+		}
+	}
+
+	kdbg_print(arr->inst,
+	    "Error: *** Failed to lookup trace by id(%llu)\n", id);
+	arr->err = -1;
+}
+
+static void
+gen_trace_name(kdbg_trace_head_t *trace, char *buf, size_t size)
+{
+	if (trace->type == KDBG_TRACE_DEF) {
+		kdbg_trace_def_t *def = (kdbg_trace_def_t *)trace;
+		snprintf(buf, size, "%s:%s", def->impl->mod, def->name);
+	} else { // trace->type == KDBG_TRACE_IMP
+		kdbg_trace_imp_t *imp = (kdbg_trace_imp_t *)trace;
+		snprintf(buf, size, "%s:%s", imp->mod, imp->name);
+	}
+}
+
+static void
+fill_trace_by_name(trace_arr_t *arr, const char *name, int exact)
+{
+	trace_iter_t iter;
+	kdbg_trace_head_t *trace;
+
+	int len = 0, match;
+	if (!exact && !(len = strlen(name))) {
+		kdbg_print(arr->inst, "Error: *** pattern(^) is empty\n");
+		arr->err = -1;
+		return;
+	}
+
+	char namebuf[128];
+	for_each_trace(arr->mgr, &iter, trace) {
+		gen_trace_name(trace, namebuf, sizeof(namebuf));
+		match = exact ? !strcmp(namebuf, name) :
+		    !strncmp(namebuf, name, len);
+		if (match) {
+			fill_single_trace(arr, trace);
+			if (arr->err)
+				break;
+		}
+	}
+}
+
+static void
+fill_trace_by_range(trace_arr_t *arr, const char *arg)
+{
+	if (*arg == '^') {
+		kdbg_print(arr->inst,
+		    "Error: *** TracePattern is not supported in TraceRange\n");
+		arr->err = -1;
+		return;
+	}
+
+	uint64_t id = 0;
+	if (str2u64(arg, &id))
+		id = 0;
+
+	kdbg_trace_head_t *start = NULL;
+	if (arr->arr_cnt > 0)
+		start = arr->arr[arr->arr_cnt - 1];
+
+	char namebuf[128];
+	trace_iter_t iter;
+	kdbg_trace_head_t *trace, *end = NULL;
+	for_each_trace(arr->mgr, &iter, trace) {
+		if (!start)
+			start = trace;
+
+		if (trace->id == id) {
+			end = trace;
+			break;
+		}
+
+		gen_trace_name(trace, namebuf, sizeof(namebuf));
+		if (!strcmp(namebuf, arg)) {
+			end = trace;
+			break;
+		}
+	}
+
+	if (!end) {
+		kdbg_print(arr->inst, "Error: *** Failed to lookup trace(%s)\n",
+		    arg);
+		arr->err = -1;
+		return;
+	}
+
+	if (start->id > end->id)
+		return;
+
+	for_each_trace(arr->mgr, &iter, trace) {
+		if (trace->id < start->id)
+			continue;
+		else if (trace->id > end->id)
+			break;
+		else
+			fill_single_trace(arr, trace);
+	}
+}
+
+static int
+trace_arr_fill(trace_arr_t *arr, trace_args_t *args)
+{
+	if (args->traces_all)
+		return (fill_all(arr));
+
+	uint64_t r;
+	int is_range = 0;
+	for (int i = 0; !arr->err && i < args->traces_cnt; i++) {
+		const char *arg = args->traces_arr[i];
+		if (is_range) {
+			is_range = 0;
+			fill_trace_by_range(arr, arg);
+		} else if (!str2u64(arg, &r)) {
+			fill_trace_by_id(arr, r);
+		} else if (*arg == '^') {
+			fill_trace_by_name(arr, &arg[1], 0);
+		} else if (!strcmp(arg, ".")) {
+			is_range = 1;
+		} else {
+			fill_trace_by_name(arr, arg, 1);
+		}
+	}
+
+	return (arr->err);
+}
+
+static void
+trace_arr_destroy(trace_arr_t *arr)
+{
+	if (arr->locked) {
+		arr->locked = 0;
+		mgr_unlock(arr->mgr);
+	}
+
+	if (arr->arr) {
+		kfree(arr->arr);
+		arr->arr = NULL;
+	}
+}
+
+static void
+do_trace_switch(trace_arr_t *arr, int enable)
+{
+	const char *status[] = { "disable", "enable" };
+	const char *op = status[!!enable];
+
+	if (arr->arr_cnt == 0) {
+		kdbg_print(arr->inst, "No definitions found to %s\n", op);
+		return;
+	}
+
+	int repeat, ok, err;
+	repeat = ok = err = 0;
+
+	for (int i = 0; i < arr->arr_cnt; i++) {
+		kdbg_trace_head_t *trace = arr->arr[i];
+		if (trace->type == KDBG_TRACE_IMP) {
+			err++;
+			continue;
+		}
+
+		kdbg_trace_def_t *def = (kdbg_trace_def_t*)trace;
+		if (!!def->call != !!enable) {
+			if (enable)
+				enable_trace(def);
+			else
+				disable_trace(def);
+			ok++;
+		} else {
+			repeat++;
+		}
+	}
+
+	kdbg_print(arr->inst, "Info: %s %d traces\n", op, ok);
+}
+
+static void
+cmd_enable_trace(trace_arr_t *arr)
+{
+	do_trace_switch(arr, 1);
+}
+
+static void
+cmd_disable_trace(trace_arr_t *arr)
+{
+	do_trace_switch(arr, 0);
+}
+
+static void
+exec_cmd(trace_args_t *args, trace_arr_t *arr)
+{
+	switch (args->cmd_no) {
+	case TRACE_CMD_DUMP:
+		dump_traces(arr);
+		break;
+
+	case TRACE_CMD_ENABLE:
+		cmd_enable_trace(arr);
+		break;
+
+	case TRACE_CMD_DISABLE:
+		cmd_disable_trace(arr);
+		break;
+
+	case TRACE_CMD_CLEANUP:
+		kdbg_print(arr->inst, "Error: *** cleanup not implement\n");
+		break;
+
+	default:
+		kdbg_print(arr->inst, "Error: *** invalid cmdNo(%d)\n",
+		    args->cmd_no);
+		break;
+	}
+}
+
 KDBG_CMD_DEF(trace, TRACE_USAGE, drv_inst_t *inst, int argc, char *argv[])
 {
+	trace_mgr_t *mgr = &trace_mgr;
+
 	trace_args_t args;
 	if (trace_parse_args(&args, inst, argc, argv))
 		return (0);
 
-	dump_traces(inst, &trace_mgr, &args);
+	trace_arr_t arr;
+	if (trace_arr_init(&arr, inst, mgr)) {
+		kdbg_print(inst, "Error: Out of memory\n");
+		return (0);
+	}
+
+	if (!trace_arr_fill(&arr, &args))
+		exec_cmd(&args, &arr);
+
+	trace_arr_destroy(&arr);
 	return (0);
 }
