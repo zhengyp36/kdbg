@@ -51,19 +51,19 @@ __check_struct_head_kdbg_trace_imp_t__(void)
 /* Import module and define an implement of trace-point */
 #define KDBG_TRACE_DEFINE(mod,name,...)					\
 	static void _kdbg_trace_fun_name(mod,name)(			\
-	    const kdbg_trace_def_t *, ...);				\
+	    const kdbg_trace_def_t *, ##__VA_ARGS__);			\
 	__KDBG_TRACE_DEFINE(mod,name,#name,				\
 	    _kdbg_trace_fun_name(mod,name),				\
 	    _kdbg_macro_argc(__VA_ARGS__));				\
 	static void _kdbg_trace_fun_name(mod,name)(			\
-	    const kdbg_trace_def_t *_kdbg_trace_def_ptr_, ...)
+	    const kdbg_trace_def_t *_kdbg_trace_def_ptr_, ##__VA_ARGS__)
 
 #define __KDBG_TRACE_DEFINE(_mod,_name,strname,_call,_argc)		\
 	static kdbg_trace_imp_t _kdbg_trace_imp_name(_mod,_name) = {	\
 		.head		= { .type = KDBG_TRACE_IMP },		\
 		.mod		= #_mod,				\
 		.name		= strname,				\
-		.call		= _call,				\
+		.call		= (kdbg_trace_call_t*)_call,		\
 		.argc		= _argc,				\
 		.file		= __FILE__,				\
 		.line		= __LINE__				\

@@ -121,6 +121,25 @@ static void dump_stat_len(dump_ctx_t *, int, const char *, ...);
 
 #define bool2str(v) (!!(v) ? "true" : "false")
 
+static inline int
+trace_def_switch_able(const kdbg_trace_def_t *def)
+{
+	return (def->impl && def->impl->call &&
+	    !strcmp(def->name, def->impl->name) &&
+	    def->impl->argc == def->argc);
+}
+
+static inline int
+trace_def_argc_unmatched(const kdbg_trace_def_t *def)
+{
+	return (def->impl && def->impl->call &&
+	    !strcmp(def->name, def->impl->name) &&
+	    def->impl->argc != def->argc);
+}
+
+#define def_status(def)							\
+	(trace_def_switch_able(def) ? bool2str((def)->call) : "--")
+
 static trace_mgr_t trace_mgr = {
 	.mtx = __MUTEX_INITIALIZER(trace_mgr.mtx)
 };
@@ -153,13 +172,42 @@ imp_cmp(const void *i1, const void *i2)
 		return (strcmp(imp1->name, imp2->name));
 }
 
+static inline void
+init_trace_head(kdbg_trace_head_t *head)
+{
+	head->next = NULL;
+	head->id = 0;
+}
+
+static inline void
+init_def_list(kdbg_trace_def_list_t *ls)
+{
+	ls->head = NULL;
+	ls->cnt = 0;
+	ls->enable_cnt = 0;
+}
+
+static inline void
+init_imp(kdbg_trace_imp_t *imp)
+{
+	init_trace_head(&imp->head);
+	init_def_list(&imp->defs);
+	init_def_list(&imp->defs_hang);
+	imp->next_mod = imp->curr_mod = NULL;
+	imp->registered = 0;
+}
+
 static void
 get_imp_arr(imp_arr_t *arr)
 {
 	arr->arr = &__kdbg_trace_impl_start + 1;
 	arr->cnt = &__kdbg_trace_impl_stop - arr->arr;
-	if (arr->cnt > 0)
+
+	if (arr->cnt > 0) {
+		for (int i = 0; i < arr->cnt; i++)
+			init_imp(arr->arr[i]);
 		sort(arr->arr, arr->cnt, sizeof(arr->arr[0]), imp_cmp, NULL);
+	}
 	kdbg_log("There are %d trace-imp-definitions found", arr->cnt);
 }
 
@@ -322,18 +370,25 @@ trace_mgr_init(trace_mgr_t *mgr)
 		imp = arr.arr[i];
 		if (imp_lookup(mgr, imp->mod, imp->name, &where, &where_mod)) {
 			info = "exist";
-		} else if (imp_is_mod_only(imp->name) && *where_mod) {
-			info = "skip module-only";
 		} else {
 			info = "insert";
 			imp->curr_mod = *where_mod ? *where_mod : imp;
 			*where = imp;
 		}
-		kdbg_log("%s: mod=%s, name=%s", info, imp->mod, imp->name);
+		kdbg_log("%s: mod=%s, name={%s}", info, imp->mod, imp->name);
 	}
 
 	trace_order(mgr);
 	mgr->inited = 1;
+}
+
+static inline kdbg_trace_def_t *
+init_def(kdbg_trace_def_t *def, kdbg_trace_imp_t *imp)
+{
+	init_trace_head(&def->head);
+	def->impl = imp;
+	def->call = NULL;
+	return (def);
 }
 
 static int
@@ -347,8 +402,7 @@ add_trace(kdbg_trace_def_list_t *list,
 		iter = (kdbg_trace_def_t **)&(*iter)->head.next;
 	}
 
-	def->impl = imp;
-	*iter = def;
+	*iter = init_def(def, imp);
 	list->cnt++;
 	return (1);
 }
@@ -382,25 +436,29 @@ global_enable_cnt_dec(void)
 	}
 }
 
-static inline void
+static inline int
 enable_trace(kdbg_trace_def_t *def)
 {
 	// The def must be in the list of def->impl.defs but here not check it
-	if (!def->call && def->impl && def->impl->call) {
+	if (!def->call && trace_def_switch_able(def)) {
 		def->call = def->impl->call;
 		def->impl->defs.enable_cnt++;
 		global_enable_cnt_inc();
+		return (1);
 	}
+	return (0);
 }
 
-static inline void
+static inline int
 disable_trace(kdbg_trace_def_t *def)
 {
 	if (def->call && def->impl && def->impl->defs.enable_cnt > 0) {
 		def->impl->defs.enable_cnt--;
 		def->call = NULL;
 		global_enable_cnt_dec();
+		return (1);
 	}
+	return (0);
 }
 
 static void
@@ -438,10 +496,8 @@ register_traces(trace_mgr_t *mgr, const char *mod, kdbg_trace_def_t **defs,
 	kdbg_trace_imp_t *imp, **where, **where_mod = NULL;
 	const char *info;
 
-#define FMT_TRACE_DEF "name=%s,call=0x%lx,argc=%d,file=%s,func=%s,line=%d"
-#define VAL_TRACE_DEF(def)						\
-	def->name, (unsigned long)def->call, def->argc, def->file,	\
-	    def->func, def->line
+#define FMT_TRACE_DEF "name=%s,argc=%d,file=%s,func=%s,line=%d"
+#define VAL_TRACE_DEF(def) def->name, def->argc, def->file, def->func, def->line
 
 	r->ok_cnt = r->hang_cnt = r->err_cnt = 0;
 	for (pdef = defs; !!(def = *pdef); pdef++) {
@@ -459,8 +515,8 @@ register_traces(trace_mgr_t *mgr, const char *mod, kdbg_trace_def_t **defs,
 			r->err_cnt++;
 			break;
 		}
-		kdbg_log("Register %s trace-def: "FMT_TRACE_DEF,
-		    info, VAL_TRACE_DEF(def));
+		kdbg_log("Register %s trace-def: mod=%s,"FMT_TRACE_DEF,
+		    info, mod, VAL_TRACE_DEF(def));
 	}
 
 	if (r->ok_cnt > 0 || r->hang_cnt > 0) {
@@ -480,13 +536,19 @@ dump_single_trace(dump_ctx_t *ctx, kdbg_trace_head_t *trace)
 		kdbg_trace_def_t *def = (kdbg_trace_def_t *)trace;
 		snprintf(ctx->namebuf, sizeof(ctx->namebuf), "%s:%s",
 		    def->impl->mod, def->name);
+		if (trace_def_argc_unmatched(def))
+			snprintf(ctx->buffer, sizeof(ctx->buffer),
+			    "%d:%d", def->argc, def->impl->argc);
+		else
+			snprintf(ctx->buffer, sizeof(ctx->buffer),
+			    "%d", def->argc);
 		kdbg_print(inst, "Details of Single-Trace [DEF]:\n");
 		kdbg_print(inst, "------------------------------\n");
 		kdbg_print(inst, "[%-8s] %d\n", DUMP_TITLE_TRACE_ID, trace->id);
 		kdbg_print(inst, "[%-8s] %s\n", DUMP_TITLE_NAME,  ctx->namebuf);
-		kdbg_print(inst, "[%-8s] %d\n", DUMP_TITLE_ARGC,     def->argc);
+		kdbg_print(inst, "[%-8s] %s\n", DUMP_TITLE_ARGC,   ctx->buffer);
 		kdbg_print(inst, "[%-8s] %s\n", DUMP_TITLE_ENABLE,
-		                                           bool2str(def->call));
+		                                               def_status(def));
 		kdbg_print(inst, "[%-8s] %s:%d\n",
 		                                DUMP_TITLE_FUNC,     def->func,
 		                                                     def->line);
@@ -580,11 +642,18 @@ dump_stat_by_trace(dump_ctx_t *ctx, kdbg_trace_head_t *trace)
 {
 	if (trace->type == KDBG_TRACE_DEF) {
 		kdbg_trace_def_t *def = (kdbg_trace_def_t *)trace;
+		char buffer[32];
+		if (trace_def_argc_unmatched(def))
+			snprintf(buffer, sizeof(buffer),
+			    "%d:%d", def->argc, def->impl->argc);
+		else
+			snprintf(buffer, sizeof(buffer),
+			    "%d", def->argc);
 		dump_stat_len(ctx, DUMP_TRACE_ID, "%d", def->head.id);
 		dump_stat_len(ctx, DUMP_NAME,  "%s:%s", def->impl->mod,
 		                                        def->name);
-		dump_stat_len(ctx, DUMP_ARGC,     "%d", def->argc);
-		dump_stat_len(ctx, DUMP_ENABLE,   "%s", bool2str(def->call));
+		dump_stat_len(ctx, DUMP_ARGC,     "%s", buffer);
+		dump_stat_len(ctx, DUMP_ENABLE,   "%s", def_status(def));
 		dump_stat_len(ctx, DUMP_FUNC,     "%s", def->func);
 		dump_stat_len(ctx, DUMP_LINE,     "%d", def->line);
 		dump_stat_len(ctx, DUMP_FILE,     "%s", fbase(def->file));
@@ -625,7 +694,7 @@ dump_gen_format(dump_ctx_t *ctx)
 	    DUMP_TITLE_FILE);
 
 	snprintf(ctx->def_fmt, sizeof(ctx->def_fmt),
-	    "%%-%ud%s%%-%us%s%%-%ud%s%%-%us%s%%-%us%s%%-%ud%s%%-%us\n",
+	    "%%-%ud%s%%-%us%s%%-%us%s%%-%us%s%%-%us%s%%-%ud%s%%-%us\n",
 	    ctx->len[DUMP_TRACE_ID], ctx->sep, ctx->len[DUMP_NAME], ctx->sep,
 	    ctx->len[DUMP_ARGC], ctx->sep, ctx->len[DUMP_ENABLE], ctx->sep,
 	    ctx->len[DUMP_FUNC], ctx->sep, ctx->len[DUMP_LINE], ctx->sep,
@@ -662,16 +731,22 @@ static void
 dump_trace_info_by_trace(dump_ctx_t *ctx, kdbg_trace_head_t *trace)
 {
 #define DUMP_VAL_DEF							\
-	def->head.id, ctx->namebuf, def->argc, bool2str(def->call),	\
+	def->head.id, ctx->namebuf, str_argc, def_status(def),		\
 	def->func, def->line, fbase(def->file)
 #define DUMP_VAL_IMP							\
 	imp->head.id, ctx->namebuf, imp->argc, ctx->invstr,		\
 	ctx->invstr, ctx->invstr, ctx->invstr
 
+	char str_argc[32];
 	if (trace->type == KDBG_TRACE_DEF) {
 		kdbg_trace_def_t *def = (kdbg_trace_def_t *)trace;
 		snprintf(ctx->namebuf, sizeof(ctx->namebuf), "%s:%s",
 		    def->impl->mod, def->name);
+		if (trace_def_argc_unmatched(def))
+			snprintf(str_argc, sizeof(str_argc), "%d:%d",
+			    def->argc, def->impl->argc);
+		else
+			snprintf(str_argc, sizeof(str_argc), "%d", def->argc);
 		if (!ctx->stat_max_len) {
 			kdbg_print(ctx->inst, ctx->def_fmt,
 			    DUMP_VAL_DEF);
@@ -1152,10 +1227,9 @@ do_trace_switch(trace_arr_t *arr, int enable)
 		kdbg_trace_def_t *def = (kdbg_trace_def_t*)trace;
 		if (!!def->call != !!enable) {
 			if (enable)
-				enable_trace(def);
+				ok += enable_trace(def);
 			else
-				disable_trace(def);
-			ok++;
+				ok += disable_trace(def);
 		} else {
 			repeat++;
 		}
