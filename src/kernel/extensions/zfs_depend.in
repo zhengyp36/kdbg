@@ -1,6 +1,13 @@
 # MOD=zfs
+-vdev_need_resilver_func_t
+-abd_iter_func_t
+vdev_ops_t
 spa_t
 abd_t
--abd_iter_func_t
 dsl_crypto_key_t
 vdev_t
+zio_t
+enum zio_stage
+vdev_phys_t
+vdev_boot_envblock_t
+nvpair_t

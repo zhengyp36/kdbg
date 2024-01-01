@@ -24,6 +24,18 @@ typedef long ssize_t;
 #undef FTAG
 #define	FTAG ((char *)(uintptr_t)__func__)
 
+__attribute__((format(printf,3,4)))
+int snprintf(char *, long, const char *, ...);
+
+struct dva;
+struct vdev;
+
+#define EXCLUDE_STRONG__BOOLEAN_T
+typedef enum {B_FALSE, B_TRUE} boolean_t;
+
+typedef boolean_t vdev_need_resilver_func_t(struct vdev *, const struct dva *,
+    size_t psize, uint64_t phys_birth);
+
 #include "zfs_depend.h"
 
 #endif // ZFS_DEPEND_IMPL_H

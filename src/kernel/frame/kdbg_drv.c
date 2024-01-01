@@ -336,6 +336,18 @@ hold_module(mod_mgr_t *mgr, const char *mod_name)
 	return (ok);
 }
 
+void *
+kdbg_curthread(void)
+{
+	return (current);
+}
+
+int
+kdbg_getpid(void)
+{
+	return (current->pid);
+}
+
 static void
 rele_module(mod_mgr_t *mgr, const char *mod_name)
 {
