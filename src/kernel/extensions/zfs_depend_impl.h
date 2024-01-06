@@ -27,6 +27,8 @@ typedef long ssize_t;
 __attribute__((format(printf,3,4)))
 int snprintf(char *, long, const char *, ...);
 
+int strcmp(const char *, const char *);
+
 struct dva;
 struct vdev;
 

@@ -11,3 +11,4 @@ enum zio_stage
 vdev_phys_t
 vdev_boot_envblock_t
 nvpair_t
+data_type_t
